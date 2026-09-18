@@ -39,6 +39,12 @@ VISUAL_TYPES = [
     "Mi1", "Mi4", "Mi9",
     "Tm1", "Tm2", "Tm3", "Tm4", "Tm9",
     "LC4", "LC6", "LC10a", "LC11", "LPLC1", "LPLC2",
+    # Real DNg13 upstream relay found by querying fetch_adjacencies(None, DNg13)
+    # in male-cns:v1.0: DNg13 has no direct visual-interneuron input; its
+    # strongest connected path runs LC10a (already above) -> AOTU002_b (an
+    # anterior-optic-tubercle relay) -> DNg13. Adding AOTU002_b closes that
+    # real, queried 2-hop chain so DNg13 survives filter_connected_annotations.
+    "AOTU002_b",
 ]
 DESCENDING_TYPES = ["DNg13", "DNp01"]
 
