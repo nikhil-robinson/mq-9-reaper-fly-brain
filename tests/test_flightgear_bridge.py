@@ -124,3 +124,24 @@ def test_trigger_weapons_true_and_false(mock_fg_server):
     bridge.trigger_weapons(False)
     assert bridge.get("/controls/armament/trigger") == "false"
     bridge.close()
+
+
+def test_get_retries_once_on_malformed_reply(mock_fg_server):
+    """A real live FlightGear run under sustained load produced a reply
+    missing its quoted value (dropped/delayed TCP segment); get() must
+    retry once rather than crash the whole mission loop on one bad read."""
+    port, _ = mock_fg_server
+    bridge = FlightGearBridge(host="localhost", port=port)
+    responses = iter(["garbled response with no quotes", "/controls/flight/aileron = '0' (double)\r\n/> "])
+    bridge._send = lambda line: next(responses)
+    assert bridge.get("/controls/flight/aileron") == "0"
+    bridge.close()
+
+
+def test_get_raises_after_two_malformed_replies(mock_fg_server):
+    port, _ = mock_fg_server
+    bridge = FlightGearBridge(host="localhost", port=port)
+    bridge._send = lambda line: "still garbled, no quotes"
+    with pytest.raises(ValueError):
+        bridge.get("/controls/flight/aileron")
+    bridge.close()

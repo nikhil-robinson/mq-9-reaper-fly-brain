@@ -41,9 +41,18 @@ class FlightGearBridge:
         self._sock.sendall((line + "\r\n").encode())
         return self._read_until_prompt()
 
-    def get(self, path):
+    def get(self, path, _retried=False):
+        """Read a property. Retries once on a malformed reply -- observed
+        live against a real FlightGear instance under sustained load (a
+        response missing its quoted value, likely a dropped/delayed TCP
+        segment), not just a theoretical risk."""
         response = self._send(f"get {path}")
-        return response.split("'", 2)[1]
+        parts = response.split("'")
+        if len(parts) < 2:
+            if _retried:
+                raise ValueError(f"malformed reply for {path!r} even after retry: {response!r}")
+            return self.get(path, _retried=True)
+        return parts[1]
 
     def set(self, path, value):
         self._send(f"set {path} {value}")
