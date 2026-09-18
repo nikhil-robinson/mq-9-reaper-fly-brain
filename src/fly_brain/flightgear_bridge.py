@@ -14,7 +14,18 @@ class FlightGearBridge:
     def __init__(self, host="localhost", port=5501, timeout=5.0):
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._buf = b""
-        self._read_until_prompt()
+        # Some FlightGear telnet sessions send an unsolicited "/> " banner
+        # right on connect (observed on one real instance); others send
+        # nothing until the first command (observed on another real
+        # instance, same FlightGear version -- inconsistent in practice).
+        # Drain a banner if one shows up quickly; don't block waiting for
+        # one that may never come.
+        self._sock.settimeout(0.5)
+        try:
+            self._read_until_prompt()
+        except (socket.timeout, TimeoutError):
+            self._buf = b""
+        self._sock.settimeout(timeout)
 
     def _read_until_prompt(self):
         while not self._buf.endswith(b"/> "):
