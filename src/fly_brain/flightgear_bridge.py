@@ -38,6 +38,13 @@ class FlightGearBridge:
         self._send(f"set {path} {value}")
 
     def get_telemetry(self):
+        """Return current flight state from FlightGear.
+
+        Note: heading_rad uses FlightGear's compass convention (0=North,
+        clockwise), NOT the math convention (0=East, counter-clockwise) that
+        fly_brain.course.bearing_and_distance() expects. To convert heading_rad
+        for bearing_and_distance(), use: math.radians(90.0 - heading_deg).
+        """
         return {
             "lat_deg": float(self.get("/position/latitude-deg")),
             "lon_deg": float(self.get("/position/longitude-deg")),

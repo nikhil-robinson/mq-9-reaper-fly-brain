@@ -44,7 +44,6 @@ def latlon_to_local_xy(lat_deg, lon_deg, origin_lat_deg, origin_lon_deg):
     """Equirectangular approximation: fine over a mission-scale area of a
     few km, not a real geodesic calculation. x = east offset, y = north
     offset, both meters, from the origin to (lat_deg, lon_deg)."""
-    lat_rad = math.radians(lat_deg)
     origin_lat_rad = math.radians(origin_lat_deg)
     dlat = math.radians(lat_deg - origin_lat_deg)
     dlon = math.radians(lon_deg - origin_lon_deg)
