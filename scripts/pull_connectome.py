@@ -52,6 +52,20 @@ def read_token(env_path):
     raise RuntimeError(f"NEU_API_TOKEN not found in {env_path}")
 
 
+def filter_connected_annotations(annot_out, conn_out):
+    """Drop annotated neurons with zero synapses in conn_out.
+
+    load_connectome() infers n_neurons as max(pre_id, post_id) + 1 from
+    connectivity alone (it has no other way to know about annotation-only
+    ids), so any annotated neuron with no edges here would get an index past
+    the end of W -> IndexError at sim time. Such a neuron can't affect the
+    LIF sim anyway (no synapses in = no synapses out here), so it's dropped
+    rather than inflating n_neurons for a permanently-silent row/col.
+    """
+    connected_ids = set(conn_out["pre_id"]) | set(conn_out["post_id"])
+    return annot_out[annot_out["neuron_id"].isin(connected_ids)]
+
+
 def relabel_cell_type(row):
     """Map real neuPrint type/somaSide to the labels connectome.py expects."""
     t = row["type"]
@@ -104,6 +118,12 @@ def main():
         "neuron_id": neurons_df["bodyId"].map(id_to_idx).astype("int64"),
         "cell_type": neurons_df["cell_type"],
     }).dropna(subset=["neuron_id"])
+
+    n_before = len(annot_out)
+    annot_out = filter_connected_annotations(annot_out, conn_out)
+    n_dropped = n_before - len(annot_out)
+    if n_dropped:
+        print(f"dropped {n_dropped} annotated neuron(s) with no synapses in this subnetwork", file=sys.stderr)
 
     os.makedirs(DATA_DIR, exist_ok=True)
     conn_out.to_parquet(os.path.join(DATA_DIR, "connectivity.parquet"), index=False)
