@@ -1,8 +1,10 @@
+import math
 import numpy as np
 from fly_brain.course import (
     bearing_and_distance,
     bearing_and_distance_from_body_frame_delta,
     advance_checkpoint,
+    latlon_to_local_xy,
     CHECKPOINTS,
     CHECKPOINT_RADIUS,
 )
@@ -56,3 +58,29 @@ def test_body_frame_delta_positive_bearing_when_target_to_the_left():
 def test_body_frame_delta_ignores_altitude_component():
     _, distance = bearing_and_distance_from_body_frame_delta((3.0, 4.0, 999.0))
     assert distance == 5.0
+
+
+def test_latlon_same_point_returns_origin():
+    x, y = latlon_to_local_xy(37.6, -122.4, 37.6, -122.4)
+    assert abs(x) < 1e-6
+    assert abs(y) < 1e-6
+
+
+def test_latlon_one_degree_north_is_about_111km():
+    x, y = latlon_to_local_xy(38.6, -122.4, 37.6, -122.4)
+    assert abs(x) < 1.0
+    assert 110_000 < y < 112_000
+
+
+def test_latlon_east_offset_scales_with_cos_latitude():
+    origin_lat, origin_lon = 37.6, -122.4
+    x, y = latlon_to_local_xy(origin_lat, origin_lon + 1.0, origin_lat, origin_lon)
+    expected_x = math.radians(1.0) * 6371000.0 * math.cos(math.radians(origin_lat))
+    assert abs(x - expected_x) < 1.0
+    assert abs(y) < 1.0
+
+
+def test_latlon_south_and_west_are_negative():
+    x, y = latlon_to_local_xy(36.6, -123.4, 37.6, -122.4)
+    assert x < 0
+    assert y < 0

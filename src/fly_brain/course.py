@@ -1,5 +1,6 @@
 """Checkpoint course bearing/distance and advancement (PLAN.md Sections 4-5)."""
 
+import math
 import numpy as np
 
 
@@ -34,3 +35,20 @@ def bearing_and_distance_from_body_frame_delta(target_delta):
     bearing_error = float(np.arctan2(dy, dx))
     distance = float(np.hypot(dx, dy))
     return bearing_error, distance
+
+
+_EARTH_RADIUS_M = 6371000.0
+
+
+def latlon_to_local_xy(lat_deg, lon_deg, origin_lat_deg, origin_lon_deg):
+    """Equirectangular approximation: fine over a mission-scale area of a
+    few km, not a real geodesic calculation. x = east offset, y = north
+    offset, both meters, from the origin to (lat_deg, lon_deg)."""
+    lat_rad = math.radians(lat_deg)
+    origin_lat_rad = math.radians(origin_lat_deg)
+    dlat = math.radians(lat_deg - origin_lat_deg)
+    dlon = math.radians(lon_deg - origin_lon_deg)
+
+    x = dlon * _EARTH_RADIUS_M * math.cos(origin_lat_rad)
+    y = dlat * _EARTH_RADIUS_M
+    return x, y
