@@ -32,3 +32,10 @@ def decode_controls(rates, gains=None):
     throttle = np.clip(gains["base_throttle"] - loom * gains["loom_thrust"], 0, 1)
 
     return np.array([aileron, elevator, rudder, throttle], dtype=np.float32)
+
+
+def decode_weapons_trigger(rates, threshold=0.5):
+    """Fires when the loom-detector's spike rate crosses threshold -- a
+    fly's "something's closing fast" reflex repurposed as a fire-control
+    trigger (PLAN.md Section 5)."""
+    return rates.get("loom", 0.0) >= threshold

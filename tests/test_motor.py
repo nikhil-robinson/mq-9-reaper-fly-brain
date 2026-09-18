@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from fly_brain.motor import RateTracker, decode_controls
+from fly_brain.motor import RateTracker, decode_controls, decode_weapons_trigger
 
 
 def test_rate_tracker_zero_when_never_fired():
@@ -48,3 +48,24 @@ def test_decode_controls_clips_to_valid_ranges():
     assert 0.0 <= throttle <= 1.0
     assert isinstance(action, np.ndarray)
     assert action.dtype == np.float32
+
+
+def test_weapons_trigger_fires_above_threshold():
+    assert decode_weapons_trigger({"loom": 0.8}, threshold=0.5) is True
+
+
+def test_weapons_trigger_does_not_fire_below_threshold():
+    assert decode_weapons_trigger({"loom": 0.3}, threshold=0.5) is False
+
+
+def test_weapons_trigger_fires_exactly_at_threshold():
+    assert decode_weapons_trigger({"loom": 0.5}, threshold=0.5) is True
+
+
+def test_weapons_trigger_defaults_to_no_fire_when_loom_missing():
+    assert decode_weapons_trigger({}, threshold=0.5) is False
+
+
+def test_weapons_trigger_uses_default_threshold():
+    assert decode_weapons_trigger({"loom": 0.6}) is True
+    assert decode_weapons_trigger({"loom": 0.4}) is False
