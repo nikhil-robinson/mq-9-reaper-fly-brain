@@ -52,11 +52,14 @@ def apply_terrain_polish(env, camera_target=(0, 0, 1)) -> None:
             pass
 
     # A nicer default framing than pybullet's zoomed-out-at-origin default.
+    # Distance is tight on purpose: the aircraft's actual wingspan is ~1.8m
+    # (see main_wing_link's box size in the URDF), so anything much farther
+    # than this makes it a barely-visible speck against the ground texture.
     try:
         aviary.resetDebugVisualizerCamera(
-            cameraDistance=8,
+            cameraDistance=4,
             cameraYaw=50,
-            cameraPitch=-30,
+            cameraPitch=-20,
             cameraTargetPosition=list(camera_target),
         )
     except Exception:
