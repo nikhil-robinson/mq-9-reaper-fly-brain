@@ -1,7 +1,5 @@
 """Connectome connectivity + cell-type annotation loading (PLAN.md Section 1)."""
 
-import re
-
 import numpy as np
 import pandas as pd
 import torch
@@ -15,11 +13,19 @@ _DESCENDING_NAME_MAP = {
 
 
 def load_connectome(parquet_path, device="cpu"):
+    """Load connectivity into a sparse W with W[post_id, pre_id] = weight
+    (row=target, col=source), matching LIFBrain.step's torch.sparse.mm(W, S)
+    convention.
+
+    Assumes neuron ids are dense and 0-based (0..n_neurons-1, no gaps); a
+    real neuPrint export with non-contiguous body IDs will need an
+    id-to-index remap before calling this (follow-up work).
+    """
     conn_df = pd.read_parquet(parquet_path)
     n_neurons = int(max(conn_df["pre_id"].max(), conn_df["post_id"].max()) + 1)
 
     idx = torch.tensor(
-        np.vstack([conn_df["pre_id"].values, conn_df["post_id"].values]),
+        np.vstack([conn_df["post_id"].values, conn_df["pre_id"].values]),
         dtype=torch.long,
     )
     vals = torch.tensor(conn_df["weight"].values, dtype=torch.float32)
