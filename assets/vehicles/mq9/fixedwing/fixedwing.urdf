@@ -69,12 +69,6 @@
         <box size="0.3 0.6 0.05"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here -->
-      <geometry>
-        <box size="0.3 0.6 0.05"/>
-      </geometry>
-      <material name="blue"/>
-    </visual>
   </link>
   <joint name="horizontal_tail_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-1.1 0 0"/>
@@ -95,12 +89,6 @@
         <box size="0.3 0.05 0.3"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here -->
-      <geometry>
-        <box size="0.3 0.05 0.3"/>
-      </geometry>
-      <material name="blue"/>
-    </visual>
   </link>
   <joint name="vertical_tail_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-1.1 0 0.15"/>
@@ -121,12 +109,6 @@
         <box size="0.31 0.3 0.06"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here -->
-      <geometry>
-        <box size="0.31 0.3 0.06"/>
-      </geometry>
-      <material name="blue"/>
-    </visual>
   </link>
   <joint name="ail_left_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 0.95 0"/>
@@ -147,12 +129,6 @@
         <box size="0.31 0.3 0.06"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here -->
-      <geometry>
-        <box size="0.31 0.3 0.06"/>
-      </geometry>
-      <material name="blue"/>
-    </visual>
   </link>
   <joint name="ail_right_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 -0.95  0"/>
@@ -173,12 +149,6 @@
         <box size="0.3 1.8 0.05"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here -->
-      <geometry>
-        <box size="0.3 1.8 0.05"/>
-      </geometry>
-      <material name="white"/>
-    </visual>
   </link>
   <joint name="main_wing_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 0 0"/>
@@ -199,11 +169,19 @@
         <box size="1.4 0.2 0.2"/>
       </geometry>
     </collision>
-    <visual> <!-- VISUAL - swap here: best spot for a single whole-airframe MQ-9 mesh -->
+    <visual>
+      <!-- Real MQ-9 mesh (downloaded .obj, free asset). The mesh's long axis
+           came out of the file along its own X; that's the wingspan here, so
+           it's rotated 90deg yaw to align with this model's spanwise Y axis.
+           Scale maps the mesh's ~115-unit wingspan down to this model's 1.8m
+           physics wingspan (see main_wing_link's box size above); origin
+           recenters the mesh's bounding box on the link origin. First-pass
+           placement -- nose direction/centering may want a visual tweak once
+           someone can actually look at it rendered. -->
+      <origin rpy="0 0 1.5708" xyz="0.07872255 0.02074486 -0.18056071"/>
       <geometry>
-        <box size="1.4 0.2 0.2"/>
+        <mesh filename="meshes/mq9.obj" scale="0.01557363 0.01557363 0.01557363"/>
       </geometry>
-      <material name="white"/>
     </visual>
   </link>
   <joint name="fuselage_joint" type="fixed">
