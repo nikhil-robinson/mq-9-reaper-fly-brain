@@ -51,7 +51,9 @@ DISTANCE_SCALE = 1000.0
 MIN_TAKEOFF_ALTITUDE_M = 0.0  # already airborne (--state=cruise) -- skip TAKEOFF
 MIN_TAKEOFF_AIRSPEED_MPS = 0.0
 FIRE_THRESHOLD = 0.5
-MAX_STEPS = 6000
+MAX_STEPS = 400  # real per-step latency is network-round-trip bound (~12 telnet
+# calls/step against live FlightGear), not CPU bound -- 6000 steps would run
+# for hours; this is sized for a practical demo run instead.
 STEP_HZ = 10  # brain/control tick rate; FlightGear itself runs its own physics loop
 
 # No real pitch descending neuron exists in the pulled connectome data (see
