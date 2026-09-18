@@ -118,12 +118,30 @@ Linux; confirm this exact path once FlightGear is installed — `fgfs
 `--aircraft-dir`/`--fg-aircraft` can point elsewhere if you'd rather keep it
 inside this repo.)
 
-**Sanity-check before touching the Python bridge:** launch FlightGear with
-this aircraft directly (`fgfs --aircraft=f16-block-50 --airport=<ICAO>`, or
-via the launcher GUI) and confirm it loads, spawns, and flies under manual
-keyboard/joystick control. This isolates "is FlightGear/the aircraft
-installed correctly" from "is my bridge code broken" — same reasoning as
-v1's Section 3 hardcoded-controller check.
+**Sanity-check done, both blockers resolved:** FlightGear 2020.3.19 is
+installed (`/usr/games/fgfs`, not on `$PATH` by default — use the full path
+or add `/usr/games` to `PATH`), and `NikolaiVChr/f16` is cloned to
+`~/.fgfs/Aircraft/f16` (FlightGear's real per-user aircraft search path on
+this machine, confirmed). Launched headless-safe with:
+```bash
+/usr/games/fgfs --fg-aircraft=$HOME/.fgfs/Aircraft --aircraft=f16-simplified \
+  --airport=KSFO --telnet=5501 --disable-real-weather-fetch \
+  --disable-ai-traffic --prop:/sim/terrasync/enabled=false --timeofday=noon
+```
+Confirmed booting to a flyable (if unfueled/engine-off) state — logs show
+"Initializing General Dynamics F-16 (Simplified FDM) systems" and the
+property tree answering telnet queries. Two real things to carry into the
+mission-state-machine work (Section 6): (1) **cold-and-dark start** — engine
+`cutoff=true`, `throttle=0` at spawn, same as a real aircraft; TAKEOFF phase
+needs an engine-start sequence, not just throttle-up. (2) KSFO's default
+parking spot put the aircraft over water ("Aircraft hit Ocean" in the log
+before any control input) — pick/verify a real runway-start position, not
+just an airport ICAO, before scripting TAKEOFF.
+
+**Startup takes ~30-45s** (scenery/systems init) before the telnet server
+actually answers commands — a bridge/script that connects and sends
+commands immediately after the port opens will hang; poll with a real
+command (not just a TCP connect check) until it responds.
 
 ---
 
@@ -135,42 +153,67 @@ protocol (`--telnet=5501` at launch, then `get /path/to/prop` /
 most robust integration path (vs. the binary `--native-fdm`/`--native-ctrls`
 struct protocols the reference Udemy-course repo uses, which require
 matching FlightGear's exact FDM struct version). Python's stdlib `telnetlib`
-was removed in 3.13, so this repo's Python 3.13 venv needs either a small
-hand-rolled `socket`-based telnet client (a handful of lines — `get`/`set`
-are just `\r\n`-terminated ASCII lines, no telnet control-sequence
-negotiation needed for FlightGear's usage) or the `telnetlib3`/`telnet-client`
-PyPI package. Prefer the hand-rolled socket client — it's genuinely a few
-lines and avoids a dependency for a protocol this simple.
+was removed in 3.13, so this repo's Python 3.13 venv needs a small
+hand-rolled `socket`-based telnet client — confirmed genuinely simple:
+`ls`/`get`/`set` are plain `\r\n`-terminated ASCII lines, no telnet
+control-sequence negotiation needed for FlightGear's usage, and the server
+prompts with `/> ` after each response (read until that suffix, not a fixed
+byte count — response length varies).
 
-**Exact property paths are a discovery task, not something to guess into
-this document.** Once FlightGear + the F-16 are installed and launched with
-`--telnet=5501`, connect (`nc localhost 5501` or a throwaway Python script)
-and run:
-```
-ls /controls/flight
-ls /controls/engines/engine[0]
-ls /controls/armament
-ls /position
-ls /orientation
-ls /velocities
-```
-to confirm the real property names for aileron/elevator/rudder/throttle,
-weapons trigger, and the telemetry (lat/lon/altitude, heading/pitch/roll,
-airspeed) this aircraft actually exposes — F-16-specific property trees can
-differ from FlightGear's generic defaults. Record the confirmed paths before
-writing `src/fly_brain/flightgear_bridge.py`'s task brief.
+**Confirmed real property paths (live telnet session against
+`f16-simplified`, FlightGear 2020.3.19):**
 
-`src/fly_brain/flightgear_bridge.py` (to be built once paths are confirmed):
+Controls to write (all `double`, unindexed under `/controls/flight`):
+- `/controls/flight/aileron`, `/controls/flight/elevator`,
+  `/controls/flight/rudder` — range not separately confirmed but standard
+  FlightGear convention is -1..1.
+- `/controls/engines/engine[0]/throttle` (`double`) — per-engine, indexed;
+  this airframe also exposes `.../cutoff` (`bool`, `true` at cold start —
+  must be set `false` before throttle has any effect), `.../starter`
+  (`bool`), `.../magnetos` (`int`).
+- `/controls/armament/trigger` (`bool`) — the weapons fire control. Also
+  present and relevant: `master-arm` (`bool`) and `master-arm-switch`
+  (`int`) likely gate whether `trigger` does anything (unarmed weapons
+  can't fire on a real aircraft either) — confirm the arm sequence during
+  Section 6 implementation, not guessed here.
+- `/controls/gear/gear-down` (`bool`) — `true` at spawn; LANDING phase
+  needs this already down (it should be, from spawn) rather than a
+  retraction/extension sequence to build for a first pass.
+
+Telemetry to read:
+- `/position/longitude-deg`, `/position/latitude-deg` (`double`, degrees —
+  NOT what `fly_brain.course.bearing_and_distance` expects, which wants
+  local (x, y, z) meters; converting lat/lon to a local tangent-plane
+  x/y for bearing math is new code, see below), `/position/altitude-ft`
+  (`double`, feet — convert to meters, `* 0.3048`).
+- `/orientation/heading-deg`, `/orientation/pitch-deg`,
+  `/orientation/roll-deg` (`double`, degrees).
+- `/velocities/airspeed-kt`, `/velocities/groundspeed-kt` (`double`, knots).
+
+**New, not in v1:** `bearing_and_distance` was built for a local flat x/y/z
+checkpoint course (meters), but FlightGear reports position as lat/lon
+(degrees) on a spherical Earth. Add
+`fly_brain.course.latlon_to_local_xy(lat_deg, lon_deg, origin_lat_deg,
+origin_lon_deg) -> (x_m, y_m)` (equirectangular approximation is plenty
+accurate over a mission-scale area of a few km — do not reach for a full
+geodesic library for this) before `bearing_and_distance` can be reused
+as-is against FlightGear telemetry.
+
+`src/fly_brain/flightgear_bridge.py`:
 - `FlightGearBridge.__init__(host="localhost", port=5501)` — opens the
-  telnet socket.
-- `.get_telemetry() -> dict` — reads position/orientation/velocity properties,
-  returns them in the units `bearing_and_distance`-style functions expect
-  (radians, meters/knots as appropriate — confirm FlightGear's actual units
-  per property during the discovery pass above; some are degrees, some
-  radians, inconsistently, by FlightGear convention).
-- `.send_controls(aileron, elevator, rudder, throttle)` — writes the four
-  control properties.
-- `.trigger_weapons(fire: bool)` — writes the confirmed trigger property.
+  socket, reads until the first `/> ` prompt (the connection banner).
+- `._read_until_prompt() -> str` — internal: accumulate `recv()` chunks
+  until the buffer ends with `/> `.
+- `.get(path: str) -> str` — sends `get {path}\r\n`, parses FlightGear's
+  `value (type)` reply format, returns the raw value string (caller casts).
+- `.set(path: str, value)` — sends `set {path} {value}\r\n`.
+- `.get_telemetry() -> dict` — reads the confirmed position/orientation/
+  velocity properties above, returns floats with units already converted
+  (meters, radians, m/s — pick ONE consistent unit system here so
+  `encode_visual`/`bearing_and_distance` callers never see feet/knots/degrees).
+- `.send_controls(aileron, elevator, rudder, throttle)` — writes the three
+  flight-control properties plus engine throttle.
+- `.trigger_weapons(fire: bool)` — writes `/controls/armament/trigger`.
 
 ---
 
