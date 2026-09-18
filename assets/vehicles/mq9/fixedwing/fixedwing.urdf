@@ -33,6 +33,13 @@
   <material name="black">
     <color rgba="0.2 0.2 0.2 1.0"/>
   </material>
+  <material name="invisible">
+    <!-- pybullet renders a link's collision shape as a fallback when no
+         <visual> is present, so a link that should be hidden (its shape is
+         part of the single MQ-9 mesh on fuselage_link instead) still needs
+         an explicit, fully-transparent <visual> rather than none at all. -->
+    <color rgba="0.0 0.0 0.0 0.0"/>
+  </material>
 
   <link name="base_link">
     <inertial>
@@ -69,6 +76,12 @@
         <box size="0.3 0.6 0.05"/>
       </geometry>
     </collision>
+    <visual>
+      <geometry>
+        <box size="0.3 0.6 0.05"/>
+      </geometry>
+      <material name="invisible"/>
+    </visual>
   </link>
   <joint name="horizontal_tail_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-1.1 0 0"/>
@@ -89,6 +102,12 @@
         <box size="0.3 0.05 0.3"/>
       </geometry>
     </collision>
+    <visual>
+      <geometry>
+        <box size="0.3 0.05 0.3"/>
+      </geometry>
+      <material name="invisible"/>
+    </visual>
   </link>
   <joint name="vertical_tail_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-1.1 0 0.15"/>
@@ -109,6 +128,12 @@
         <box size="0.31 0.3 0.06"/>
       </geometry>
     </collision>
+    <visual>
+      <geometry>
+        <box size="0.31 0.3 0.06"/>
+      </geometry>
+      <material name="invisible"/>
+    </visual>
   </link>
   <joint name="ail_left_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 0.95 0"/>
@@ -129,6 +154,12 @@
         <box size="0.31 0.3 0.06"/>
       </geometry>
     </collision>
+    <visual>
+      <geometry>
+        <box size="0.31 0.3 0.06"/>
+      </geometry>
+      <material name="invisible"/>
+    </visual>
   </link>
   <joint name="ail_right_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 -0.95  0"/>
@@ -149,6 +180,12 @@
         <box size="0.3 1.8 0.05"/>
       </geometry>
     </collision>
+    <visual>
+      <geometry>
+        <box size="0.3 1.8 0.05"/>
+      </geometry>
+      <material name="invisible"/>
+    </visual>
   </link>
   <joint name="main_wing_joint" type="fixed">
     <origin rpy="0 0 0" xyz="-0.5 0 0"/>

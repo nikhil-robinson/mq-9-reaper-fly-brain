@@ -14,10 +14,15 @@ texture, turns on shadows, hides GUI clutter, and sets a nicer default camera.
 from __future__ import annotations
 
 
-def apply_terrain_polish(env) -> None:
+def apply_terrain_polish(env, camera_target=(0, 0, 1)) -> None:
     """Best-effort cosmetic polish. Never raises: every pybullet call is
     wrapped so an unsupported flag/method in this pybullet build, or the
     absence of a GUI connection (headless), just gets skipped.
+
+    camera_target: point the debug camera at, e.g. the aircraft's actual
+    spawn position -- it defaults to the world origin, but PyFlyt's fixed-
+    wing spawns well away from (0,0,1), so pass the real position (attitude's
+    lin_pos slice) once you have it or the aircraft won't be framed at all.
     """
     aviary = getattr(getattr(env, "unwrapped", env), "env", None)
     if aviary is None:
@@ -52,7 +57,7 @@ def apply_terrain_polish(env) -> None:
             cameraDistance=8,
             cameraYaw=50,
             cameraPitch=-30,
-            cameraTargetPosition=[0, 0, 1],
+            cameraTargetPosition=list(camera_target),
         )
     except Exception:
         pass

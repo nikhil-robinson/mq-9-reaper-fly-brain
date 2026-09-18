@@ -53,7 +53,7 @@ def main():
     unwrapped = env.unwrapped
     state = _reset(unwrapped, drone_options)
 
-    apply_terrain_polish(env)
+    apply_terrain_polish(env, camera_target=state["attitude"][LIN_POS_SLICE])
     hud = FlightHUD(env)
 
     for step in range(STEPS):

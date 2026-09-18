@@ -78,7 +78,7 @@ def main(render=True):
     state = _reset(unwrapped, drone_options)
 
     if render:
-        apply_terrain_polish(env)
+        apply_terrain_polish(env, camera_target=state["attitude"][LIN_POS_SLICE])
     hud = FlightHUD(env)
 
     max_steps = 20000
