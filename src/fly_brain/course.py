@@ -25,3 +25,12 @@ def advance_checkpoint(current_index, distance, checkpoints, radius=CHECKPOINT_R
     if distance < radius:
         return min(current_index + 1, len(checkpoints) - 1)
     return current_index
+
+
+def bearing_and_distance_from_body_frame_delta(target_delta):
+    """target_delta: (x, y, z) body-frame vector to target (x=forward, y=left/right),
+    e.g. PyFlyt's obs['target_deltas'][i]. Returns (bearing_error, distance)."""
+    dx, dy = target_delta[0], target_delta[1]
+    bearing_error = float(np.arctan2(dy, dx))
+    distance = float(np.hypot(dx, dy))
+    return bearing_error, distance

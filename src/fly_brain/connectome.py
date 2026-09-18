@@ -40,7 +40,7 @@ def load_neuron_indices(annotation_path):
     annot_df = pd.read_parquet(annotation_path)
 
     is_photoreceptor = annot_df["cell_type"].str.match(r"^R1-R6")
-    photoreceptor_idx = annot_df.loc[is_photoreceptor, "neuron_id"].to_numpy(dtype=np.int64)
+    photoreceptor_idx = annot_df.loc[is_photoreceptor, "neuron_id"].to_numpy(dtype=np.int64).copy()
 
     descending_idx = {}
     for _, row in annot_df.iterrows():

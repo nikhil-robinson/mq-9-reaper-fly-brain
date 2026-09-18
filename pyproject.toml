@@ -7,6 +7,8 @@ dependencies = [
     "numpy",
     "pandas",
     "pyarrow",
+    "PyFlyt",
+    "gymnasium",
 ]
 
 [tool.setuptools.packages.find]

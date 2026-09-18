@@ -1,5 +1,11 @@
 import numpy as np
-from fly_brain.course import bearing_and_distance, advance_checkpoint, CHECKPOINTS, CHECKPOINT_RADIUS
+from fly_brain.course import (
+    bearing_and_distance,
+    bearing_and_distance_from_body_frame_delta,
+    advance_checkpoint,
+    CHECKPOINTS,
+    CHECKPOINT_RADIUS,
+)
 
 
 def test_bearing_zero_when_checkpoint_dead_ahead():
@@ -34,3 +40,19 @@ def test_advance_checkpoint_moves_on_when_close():
 def test_advance_checkpoint_clamps_at_last():
     last = len(CHECKPOINTS) - 1
     assert advance_checkpoint(last, distance=0.0, checkpoints=CHECKPOINTS, radius=CHECKPOINT_RADIUS) == last
+
+
+def test_body_frame_delta_zero_bearing_when_target_dead_ahead():
+    bearing_err, distance = bearing_and_distance_from_body_frame_delta((10.0, 0.0, 2.0))
+    assert abs(bearing_err) < 1e-9
+    assert distance == 10.0
+
+
+def test_body_frame_delta_positive_bearing_when_target_to_the_left():
+    bearing_err, _ = bearing_and_distance_from_body_frame_delta((0.0, 10.0, 0.0))
+    assert bearing_err > 0
+
+
+def test_body_frame_delta_ignores_altitude_component():
+    _, distance = bearing_and_distance_from_body_frame_delta((3.0, 4.0, 999.0))
+    assert distance == 5.0
