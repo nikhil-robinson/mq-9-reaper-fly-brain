@@ -14,7 +14,8 @@ _MOCK_PROPS = {
     "/controls/flight/rudder": ("0", "double"),
     "/controls/engines/engine[0]/throttle": ("0", "double"),
     "/controls/engines/engine[0]/cutoff": ("true", "bool"),
-    "/controls/armament/trigger": ("false", "bool"),
+    "/controls/armament/master-arm": ("false", "bool"),
+    "/fdm/jsbsim/fcs/guntrigger": ("false", "bool"),
     "/position/longitude-deg": ("-122.3933734", "double"),
     "/position/latitude-deg": ("37.62870187", "double"),
     "/position/altitude-ft": ("1000.0", "double"),
@@ -117,12 +118,25 @@ def test_send_controls_writes_all_four_properties(mock_fg_server):
 
 
 def test_trigger_weapons_true_and_false(mock_fg_server):
+    # Fires via fdm/jsbsim/fcs/guntrigger, not controls/armament/trigger --
+    # confirmed live against a real FlightGear instance that the latter is a
+    # no-op without the aircraft's Nasal weapon-selection state satisfied
+    # first, while guntrigger directly releases the M61A1 cannon submodel
+    # (verified live via a real ammo-count drop, 510 -> 509 over 2s firing).
     port, _ = mock_fg_server
     bridge = FlightGearBridge(host="localhost", port=port)
     bridge.trigger_weapons(True)
-    assert bridge.get("/controls/armament/trigger") == "true"
+    assert bridge.get("/fdm/jsbsim/fcs/guntrigger") == "true"
     bridge.trigger_weapons(False)
-    assert bridge.get("/controls/armament/trigger") == "false"
+    assert bridge.get("/fdm/jsbsim/fcs/guntrigger") == "false"
+    bridge.close()
+
+
+def test_arm_weapons_sets_master_arm(mock_fg_server):
+    port, _ = mock_fg_server
+    bridge = FlightGearBridge(host="localhost", port=port)
+    bridge.arm_weapons()
+    assert bridge.get("/controls/armament/master-arm") == "true"
     bridge.close()
 
 

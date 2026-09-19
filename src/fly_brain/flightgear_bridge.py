@@ -13,6 +13,15 @@ _KT_TO_MPS = 0.514444
 class FlightGearBridge:
     def __init__(self, host="localhost", port=5501, timeout=5.0):
         self._sock = socket.create_connection((host, port), timeout=timeout)
+        # Without this, every get/set round-trip stalls ~0.4s -- Nagle's
+        # algorithm on our send colliding with FlightGear's delayed ACK on
+        # its end, confirmed live by timing a single `get` before/after
+        # this flag (0.39s -> <5ms). At 7+ properties read per control
+        # step, that 0.4s-per-call tax alone was slowing the loop enough
+        # that a fast-rolling jet could roll hundreds of degrees between
+        # two control updates, which looked like a flight-control bug but
+        # wasn't one.
+        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._buf = b""
         # Some FlightGear telnet sessions send an unsolicited "/> " banner
         # right on connect (observed on one real instance); others send
@@ -57,6 +66,17 @@ class FlightGearBridge:
     def set(self, path, value):
         self._send(f"set {path} {value}")
 
+    def run_nasal(self, script):
+        """Execute arbitrary Nasal over telnet's undocumented `run` command.
+
+        Needed for properties that `set` creates as the wrong type (e.g.
+        heading-bug-deg comes out as string via `set`, breaking the
+        autopilot -- confirmed live against the c172p's KAP140) and for
+        calling aircraft Nasal functions directly (e.g. the F-15's
+        AFCS heading-mode cycler, which isn't a settable property at all).
+        """
+        self._send(f"run nasal script={script}")
+
     def get_telemetry(self):
         """Return current flight state from FlightGear.
 
@@ -81,8 +101,27 @@ class FlightGearBridge:
         self.set("/controls/flight/rudder", rudder)
         self.set("/controls/engines/engine[0]/throttle", throttle)
 
+    def arm_weapons(self):
+        """Arm the master-arm switch. Without this, trigger_weapons() is a
+        silent no-op -- confirmed live: firing with master-arm still false
+        left /ai/submodels/submodel[2]/count (the cannon's live ammo count)
+        completely unchanged after repeated fire commands."""
+        self.set("/controls/armament/master-arm", "true")
+
     def trigger_weapons(self, fire):
-        self.set("/controls/armament/trigger", "true" if fire else "false")
+        """Fire the M61A1 cannon via its actual JSBSim FCS trigger property.
+
+        /controls/armament/trigger (the pilot's physical trigger switch)
+        only does something once fire-control.nas's Nasal state machine has
+        a weapon selected via its pylon-selection logic -- confirmed live
+        that setting it alone left the cannon's ammo count unchanged after
+        repeated fire commands. fdm/jsbsim/fcs/guntrigger is the low-level
+        property that actually releases the M61A1 submodel (Nasal/pylons.nas
+        wires the cannon's SubModelWeapon straight to this property); setting
+        it directly, with master-arm on, verified live via a real ammo-count
+        drop (510 -> 509 over 2s of firing).
+        """
+        self.set("/fdm/jsbsim/fcs/guntrigger", "true" if fire else "false")
 
     def close(self):
         self._sock.close()

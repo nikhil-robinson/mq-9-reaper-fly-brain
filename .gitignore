@@ -6,3 +6,4 @@ __pycache__/
 .env
 data/
 mq-9.zip
+SESSION.md

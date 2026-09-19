@@ -7,11 +7,21 @@ then hands control to the brain: bearing/distance to a scripted waypoint
 drives the visual encoder, descending-neuron spike rates decode to control
 surfaces and a weapons trigger off the loom detector.
 
-Run FlightGear first, in a separate terminal:
+Run FlightGear first, in a separate terminal. Note --ai-scenario loads the
+real 25-aircraft target scenario (Scenarios/moving_targets_around_KXTA.xml) --
+--disable-ai-traffic would suppress it, so it's intentionally left off.
+Spawn airport is KXTA itself (the scenario's real orbit center) -- KEDW,
+used in an earlier version, is ~320km away, well outside render/visual
+range, which is why the AI aircraft never appeared on screen even though
+/ai/models/count correctly reported 25. --altitude=15000 matches the
+scenario's real AI orbit altitude (Scenarios/moving_targets_around_KXTA.xml
+sets <altitude-ft>15000</altitude-ft> on its aircraft) -- confirmed live
+that spawning at 5000ft put terrain/cockpit in view but left every target
+10,000ft directly overhead and invisible:
     /usr/games/fgfs --fg-aircraft=$HOME/.fgfs/Aircraft --aircraft=f16-simplified \\
-      --airport=KEDW --runway=22 --state=cruise --altitude=5000 --vc=300 \\
-      --telnet=5501 --disable-real-weather-fetch --disable-ai-traffic \\
-      --prop:/sim/terrasync/enabled=false --timeofday=noon
+      --airport=KXTA --runway=03L --state=cruise --altitude=15000 --vc=300 \\
+      --telnet=5501 --disable-real-weather-fetch --ai-scenario=moving_targets_around_KXTA \\
+      --prop:/sim/terrasync/enabled=true --timeofday=noon
 
 Then: .venv/bin/python scripts/fly_f16.py
 """
@@ -67,6 +77,28 @@ STEP_HZ = 10  # brain/control tick rate; FlightGear itself runs its own physics 
 PITCH_TRIM_GAIN = 0.0003  # elevator units per meter of altitude error
 PITCH_TRIM_LIMIT = 0.2
 
+# The LIF network's steering output has no roll damper of its own: a
+# sustained one-direction aileron rate (the descending-neuron spike rate
+# rarely flips sign quickly) banks the aircraft further and further with
+# nothing opposing it, and an uncorrected bank bleeds altitude into an
+# ever-tightening spiral dive -- confirmed live: FlightGear logged "hit
+# Ocean and exploded" after ~150s of otherwise-normal brain-controlled
+# cruise, not at handoff. A real aircraft's roll-rate damper/SAS supplies
+# exactly this kind of correction; this is a scripted stand-in for it,
+# layered on top of (not replacing) the brain's aileron output, the same
+# pattern as PITCH_TRIM above.
+ROLL_LIMIT_DEG = 20.0  # bank angle beyond which corrective aileron kicks in
+ROLL_DAMP_GAIN = 0.05  # aileron units per degree of excess bank
+ROLL_DAMP_LIMIT = 1.0
+# Live test proved the soft damper above insufficient on its own: bank hit
+# +103.4deg (well past inverted) because its correction was only ever added
+# to the brain's own aileron command, which can still win the sum. Past this
+# threshold, aileron/rudder authority is taken away from the brain entirely
+# and driven to a hard wings-level recovery command instead -- the same
+# "authority override" real fly-by-wire systems use for extreme-attitude
+# recovery, not a subtle nudge. Elevator/throttle/weapons stay brain-owned.
+ROLL_HARD_RECOVER_DEG = 60.0
+
 
 def heading_deg_to_math_rad(heading_deg):
     """FlightGear compass heading (0=North, clockwise) -> math convention
@@ -88,22 +120,26 @@ def main():
 
     print("Connecting to FlightGear on localhost:5501 (make sure it's running)...")
     bridge = FlightGearBridge(host="localhost", port=5501)
-    print("Connected.")
+    bridge.arm_weapons()
+    ammo_start = int(float(bridge.get("/ai/submodels/submodel[2]/count")))
+    print(f"Connected. Master-arm on, cannon ammo: {ammo_start} rounds.")
 
     telem = bridge.get_telemetry()
     origin_lat, origin_lon = telem["lat_deg"], telem["lon_deg"]
     target_altitude_m = telem["altitude_m"]
-    spawn_heading_math_rad = heading_deg_to_math_rad(math.degrees(telem["heading_rad"]))
     print(f"Origin: lat={origin_lat:.6f} lon={origin_lon:.6f} alt={telem['altitude_m']:.1f}m")
 
-    # Waypoints relative to actual spawn heading: mostly ahead, gentle turns.
-    def ahead(distance_m, side_offset_m):
-        fx = math.cos(spawn_heading_math_rad)
-        fy = math.sin(spawn_heading_math_rad)
-        sx, sy = -fy, fx  # left of heading
-        return (fx * distance_m + sx * side_offset_m, fy * distance_m + sy * side_offset_m)
-
-    waypoints_local = [ahead(4000.0, 1000.0), ahead(6000.0, -2000.0)]
+    # The waypoint is the real AI target scenario's orbit center (see
+    # Scenarios/moving_targets_around_KXTA.xml -- every target orbits
+    # lat=37.258, lon=-115.797), not an arbitrary offset from spawn heading.
+    # An earlier version picked waypoints relative to spawn heading alone,
+    # which had no relationship to where the actual AI targets were --
+    # confirmed live: the brain flew toward empty space while 25 real AI
+    # aircraft orbited a different point entirely.
+    TARGET_LAT_DEG = 37.258
+    TARGET_LON_DEG = -115.797
+    target_x, target_y = latlon_to_local_xy(TARGET_LAT_DEG, TARGET_LON_DEG, origin_lat, origin_lon)
+    waypoints_local = [(target_x, target_y)]
     print(f"Waypoints (local m, relative to spawn): {waypoints_local}")
 
     phase = MissionPhase.CRUISE  # already airborne, no scripted TAKEOFF needed
@@ -151,6 +187,15 @@ def main():
                           PITCH_TRIM_GAIN * (target_altitude_m - telem["altitude_m"])))
         action[1] = max(-1.0, min(1.0, action[1] + pitch_trim))
 
+        roll_deg = math.degrees(telem["roll_rad"])
+        if abs(roll_deg) > ROLL_HARD_RECOVER_DEG:
+            action[0] = -math.copysign(1.0, roll_deg)
+            action[2] = 0.0
+        else:
+            excess_bank = max(0.0, abs(roll_deg) - ROLL_LIMIT_DEG)
+            roll_damp = -math.copysign(1.0, roll_deg) * min(ROLL_DAMP_LIMIT, ROLL_DAMP_GAIN * excess_bank)
+            action[0] = max(-1.0, min(1.0, action[0] + roll_damp))
+
         bridge.send_controls(*action)
         bridge.trigger_weapons(fire)
         if fire:
@@ -160,15 +205,22 @@ def main():
             waypoint_index = min(waypoint_index + 1, len(waypoints_local) - 1)
 
         if step % 10 == 0:
+            # Real ammo count from the sim, not just our own fire-flag
+            # tally -- proves rounds actually left the aircraft rather than
+            # trigger_weapons() being a no-op (see FlightGearBridge docstring).
+            ammo_now = int(float(bridge.get("/ai/submodels/submodel[2]/count")))
+            rounds_fired = ammo_start - ammo_now
             print(
                 f"step {step}: phase={phase.name} wp={waypoint_index} bearing={math.degrees(bearing_err):+.1f}deg "
-                f"dist={dist:.0f}m action={[round(a, 2) for a in action]} fire={fire} fired_total={fired_count}"
+                f"dist={dist:.0f}m roll={roll_deg:+.1f}deg alt={telem['altitude_m']:.0f}m "
+                f"action={[round(a, 2) for a in action]} fire={fire} rounds_fired={rounds_fired}"
             )
 
         time.sleep(1.0 / STEP_HZ)
 
     bridge.close()
-    print(f"Done. Fired weapons on {fired_count} of {MAX_STEPS} steps.")
+    ammo_final = int(float(bridge.get("/ai/submodels/submodel[2]/count")))
+    print(f"Done. Fired {ammo_start - ammo_final} real rounds of {ammo_start} over {MAX_STEPS} steps.")
 
 
 if __name__ == "__main__":
