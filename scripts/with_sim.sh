@@ -11,15 +11,36 @@ cd "$(dirname "$0")/.."
 # Kill any previous flight script first: it still holds the native-fdm UDP
 # port, and the next run dies on bind() with "Address already in use" before
 # it ever reaches the sim (hit live).
-pkill -9 -f 'python.*f15_intercept' 2>/dev/null || true
+pkill -9 -f 'python.*f15_intercept|python.*f15_obstacle_run|python.*f15_airshow' 2>/dev/null || true
 pkill -9 -f 'flatpak run.*fgfs' 2>/dev/null || true
 pkill -9 -f 'bwrap.*fgfs' 2>/dev/null || true
 sleep 3
 
+# FG_START=air (default) spawns at 15000ft already flying -- right for
+# maneuver work. FG_START=ground spawns on the runway, needed for any
+# sequence that begins with a takeoff or ends with a landing.
+if [ "${FG_START:-air}" = "ground" ]; then
+    START_ARGS="--on-ground"
+else
+    # FG_ALT: aerobatics need room. Terrain here is ~5400ft and the show's
+    # hard deck is 4000ft AGL (~9400ft MSL), so a 15000ft start leaves only
+    # ~5600ft of working room -- less than a Split-S consumes.
+    START_ARGS="--altitude=${FG_ALT:-15000} --vc=300 --in-air"
+fi
+
+# AI_SCENARIO: name of a Scenarios/*.xml (no extension) to load a real AI
+# aircraft at startup, e.g. static_targets_scenario -- FlightGear then owns
+# all of that contact's properties itself, unlike a hand-built /ai/models
+# node (see f15_props.py's spawn_target docstring for why that matters).
+SCENARIO_ARGS=""
+if [ -n "${AI_SCENARIO:-}" ]; then
+    SCENARIO_ARGS="--ai-scenario=${AI_SCENARIO}"
+fi
+
 LOG="${TMPDIR:-/tmp}/fg.log"
 nohup flatpak run --command=fgfs org.flightgear.FlightGear \
   --fg-aircraft="$HOME/.fgfs/Aircraft" --aircraft=f15c \
-  --airport=KXTA --runway=03L --altitude=15000 --vc=300 --in-air \
+  --airport=KXTA --runway=03L $START_ARGS $SCENARIO_ARGS \
   --telnet=5501 --disable-real-weather-fetch --timeofday=noon \
   --native-fdm=socket,out,20,,5504,udp \
   --native-ctrls=socket,in,20,,5505,udp > "$LOG" 2>&1 &

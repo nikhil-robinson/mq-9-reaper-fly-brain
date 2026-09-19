@@ -73,6 +73,8 @@ def decode_fdm(packet):
         "lon_deg": longitude * rad2deg,
         "lat_deg": latitude * rad2deg,
         "altitude_m": altitude,
+        "agl_m": agl,  # height above ground -- takeoff rotation and landing flare
+
         "roll_deg": phi * rad2deg,
         "pitch_deg": theta * rad2deg,
         "heading_deg": psi * rad2deg,
@@ -83,14 +85,15 @@ def decode_fdm(packet):
     }
 
 
-def encode_ctrls(aileron, elevator, rudder, throttle):
+def encode_ctrls(aileron, elevator, rudder, throttle, gear_down=False,
+                 brakes=0.0, flaps=0.0, speedbrake=0.0):
     """Pack a full FGNetCtrls packet. Every field is given an explicit
     safe value -- see module docstring for why zero-filling is dangerous
     (kills the engine, can freeze the sim)."""
     version = FG_NET_CTRLS_VERSION
     # 9d: aileron, elevator, rudder, aileron_trim, elevator_trim,
     # rudder_trim, flaps, spoilers, speedbrake
-    d9 = (aileron, elevator, rudder, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    d9 = (aileron, elevator, rudder, 0.0, 0.0, 0.0, flaps, 0.0, speedbrake)
     # 19I: flaps_power, flap_motor_ok, num_engines, master_bat[4],
     # master_alt[4], magnetos[4], starter_power[4]
     i19 = (
@@ -138,9 +141,14 @@ def encode_ctrls(aileron, elevator, rudder, throttle):
     )
     # 5d: brake_left, brake_right, copilot_brake_left, copilot_brake_right,
     # brake_parking
-    d5 = (0.0, 0.0, 0.0, 0.0, 0.0)
+    d5 = (brakes, brakes, 0.0, 0.0, 0.0)
     # 2I: gear_handle, master_avionics
-    i2 = (0, 1)  # gear up (airborne), avionics on
+    # gear_handle must be a real parameter, not a constant: FGNetCtrls
+    # overwrites it on EVERY packet, so setting /controls/gear/gear-down over
+    # telnet is silently reverted ~20 times a second. Takeoff and landing are
+    # impossible without this. Default stays False (up) to match the in-air
+    # start every previous script used.
+    i2 = (1 if gear_down else 0, 1)  # gear handle, avionics on
     # 11d: comm_1, comm_2, nav_1, nav_2, wind_speed_kt, wind_dir_deg,
     # turbulence_norm, temp_c, press_inhg, hground, magvar
     d11 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 29.92, 0.0, 0.0)
@@ -189,8 +197,11 @@ class NativeBridge:
         self._latest = packet
         return decode_fdm(packet)
 
-    def send_controls(self, aileron, elevator, rudder, throttle):
-        packet = encode_ctrls(aileron, elevator, rudder, throttle)
+    def send_controls(self, aileron, elevator, rudder, throttle,
+                      gear_down=False, brakes=0.0, flaps=0.0, speedbrake=0.0):
+        packet = encode_ctrls(aileron, elevator, rudder, throttle,
+                              gear_down=gear_down, brakes=brakes,
+                              flaps=flaps, speedbrake=speedbrake)
         self._send_sock.sendto(packet, self._send_addr)
 
     def close(self):

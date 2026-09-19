@@ -378,11 +378,36 @@ def startup(t):
     # real stability augmentation stays on while the autopilot lets go of the
     # stick. This is why disengaging att-hold outright (session 4) was chaos
     # and this is not -- that removed the augmentation too.
-    t.set("/autopilot/locks/altitude", "")
-    t.set("/autopilot/locks/heading", "")
-    time.sleep(0.5)
-    pitch_sw = t.get("/fdm/jsbsim/autoflight/input/pitch-switch")
-    roll_sw = t.get("/fdm/jsbsim/autoflight/input/roll-switch")
+    # Retry: engaging att-hold re-seeds these locks asynchronously, so a
+    # single clear can be undone a moment later by the aircraft's own
+    # listener. Confirmed live -- an identical startup sometimes came up with
+    # pitch-switch/roll-switch back at 1. Clear until it actually sticks
+    # rather than clearing once and hoping we won the race.
+    connect_stick(t)
+
+
+def connect_stick(t):
+    """Clear the altitude/heading locks so our stick inputs reach the FCS.
+
+    Split out of startup() so callers with extra telnet setup to do (placing
+    obstacle models, hunting for an AI target) can do it BEFORE disconnecting
+    the stick -- confirmed live: a run that disconnected the stick as part of
+    startup() and then spent ~15-30s doing unrelated telnet work with nothing
+    actively piloting (engine-start's own wait loop plus placement/lookup
+    sleeps) glided off trim and hit terrain ("Aircraft hit ShrubCover and
+    exploded") before a single jet.step() ever ran. Leaving FlightGear's own
+    altitude/heading-hold engaged during that window costs nothing -- it's
+    only disengaged here, right before the native-protocol hot loop takes
+    over -- and it means the jet is never actually unpiloted.
+    """
+    for _ in range(10):
+        t.set("/autopilot/locks/altitude", "")
+        t.set("/autopilot/locks/heading", "")
+        time.sleep(0.4)
+        pitch_sw = t.get("/fdm/jsbsim/autoflight/input/pitch-switch")
+        roll_sw = t.get("/fdm/jsbsim/autoflight/input/roll-switch")
+        if pitch_sw == "0" and roll_sw == "0":
+            break
     print(f"  Stick connected: pitch-switch={pitch_sw} roll-switch={roll_sw} "
           f"pitch-cas={t.get('/fdm/jsbsim/cas/pitch-cas-active')} "
           f"roll-cas={t.get('/fdm/jsbsim/cas/roll-cas-active')}")
