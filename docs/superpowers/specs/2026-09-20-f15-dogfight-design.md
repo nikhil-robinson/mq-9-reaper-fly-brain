@@ -249,3 +249,45 @@ above. Session 6's `FG_HOME/AI` dead end is the precedent for checking first.
 | MP peer-to-peer does not produce usable contacts | Phase 0 gates the whole design; fall back to a kinematic enemy with our own missile model, accepting it is an approximation |
 | Impact report insufficient to judge lethality | fall back to computing miss distance ourselves from both jets' positions, which the arena already has |
 | Dogfight never converges (both sides evade forever) | scoring exposes it directly (no kills, low max-g); tune aggression asymmetrically |
+
+## Phase 0 findings (measured 2026-09-20)
+
+Gate: **PASSED.** The two-instance MP design is viable.
+
+| unknown | result |
+|---|---|
+| MP contact visibility | **YES**, both directions, repeatable: `blue_sees=['RED1']`, `red_sees=['BLUE1']`, under `/ai/models/multiplayer[N]` |
+| achieved framerate | **31-57 fps**, above fox2.nas:39's ~25fps guidance threshold even with two instances |
+| flare counter property | **deferred to Task 6** — `getFlareNode()` resolves off the contact object, so it reads `nil-contact` until a lock exists |
+| impact report location | **deferred to Task 6** — needs a real shot, which needs a lock |
+
+### Two corrections to the design's assumptions
+
+**1. The binding constraint is MEMORY, not framerate.** The spec's top risk was
+two instances starving the renderer below the guidance threshold. Measured fps
+was 31-57, so that risk is retired. What actually bit: 7.3GB total RAM, 5.6GB
+used with ~3.9GB of swap consumed, and the driving python process was killed
+silently mid-run with no traceback. `with_two_sims.sh` now trims FOOTPRINT
+(scenery paging, cloud layers, sound, LOD) rather than resolution, because
+there is fps to spare and no memory to spare.
+
+**2. A head-on merge start defeats itself.** Two jets closing at 800kt cover
+6.5km in ~16s, while sequentially starting engines and clearing the FCS locks
+on two instances takes ~60s. The jets merged and were already far apart and
+opening before the first radar read, which is what produced a designation
+failure (`active_u=nil`) that looked like a radar fault. The start is now
+CO-HEADING with a 6km offset, which is geometrically stable, and the
+maneuvering comes from CombatPilot rather than from the spawn.
+
+### The radar handles MP contacts correctly
+
+Worth recording explicitly, because it retires a whole class of suspicion:
+with the MP contact in view the radar reported `tgts=1 active_cs=RED1
+first_cs=RED1 first_type=multiplayer airbone=1`. Callsigns match exactly with
+no MP padding, and `airbone` is satisfied by `type == "multiplayer"` without
+needing the `radar` child that a scenario AI object needs.
+
+The only unmet condition was azimuth (`dev=-164deg` against a +-60deg field,
+so `display=0`) — because nothing was pointing either jet at the other. That
+is CombatPilot's job, not a property fix, so lock/fire verification moves to
+Task 6 where a pilot is actually flying.
