@@ -58,6 +58,13 @@ def decode_fdm(packet):
     alpha = fields[9]  # angle of attack, radians
     thetadot = fields[12]  # pitch rate, rad/s
     vcas = fields[14]  # calibrated airspeed, knots
+    # FlightGear's OWN climb rate, ft/s (net_fdm.hxx: ...psidot, vcas,
+    # climb_rate, v_north...). Previously the flight loop differentiated
+    # altitude against time.monotonic() instead. That is wall-clock, so it
+    # silently breaks the moment sim time != wall time (/sim/speed-up), and
+    # the K_CLIMB_G damping term it feeds is load-bearing -- session 6's
+    # pylon run oscillated 7600->21700ft without it. Take the FDM's value.
+    climb_rate_fps = fields[15]
     # 11f block (indices 88-98): visibility, elevator, elevator_trim_tab,
     # left_flap, right_flap, left_aileron, right_aileron, rudder,
     # nose_wheel, speedbrake, spoilers -- confirmed by hand-counting the
@@ -81,12 +88,13 @@ def decode_fdm(packet):
         "alpha_deg": alpha * rad2deg,
         "pitch_rate_dps": thetadot * rad2deg,
         "airspeed_kt": vcas,
+        "climb_rate_fps": climb_rate_fps,
         "elevator_pos": elevator_pos,
     }
 
 
 def encode_ctrls(aileron, elevator, rudder, throttle, gear_down=False,
-                 brakes=0.0, flaps=0.0, speedbrake=0.0):
+                 brakes=0.0, flaps=0.0, speedbrake=0.0, speedup=1):
     """Pack a full FGNetCtrls packet. Every field is given an explicit
     safe value -- see module docstring for why zero-filling is dangerous
     (kills the engine, can freeze the sim)."""
@@ -153,7 +161,13 @@ def encode_ctrls(aileron, elevator, rudder, throttle, gear_down=False,
     # turbulence_norm, temp_c, press_inhg, hground, magvar
     d11 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 29.92, 0.0, 0.0)
     # 28I: icing, speedup, freeze, reserved[25]
-    i28 = (0, 1, 0) + (0,) * 25  # speedup=1 is critical -- 0 would freeze sim time
+    # speedup is how many sim seconds pass per wall second. It MUST be
+    # sent here rather than set as /sim/speed-up over telnet: FGNetCtrls
+    # applies every field on every packet, so a telnet-set speed-up is
+    # silently reverted ~20 times a second by our own control stream (the
+    # same trap that made /controls/gear/gear-down unsettable). 0 would
+    # freeze sim time outright, so it is floored at 1.
+    i28 = (0, max(1, int(speedup)), 0) + (0,) * 25
 
     values = (version,) + d9 + i19 + d12 + i4 + d4 + i47 + d5 + i2 + d11 + i28
     return struct.pack(_CTRLS_FORMAT, *values)
@@ -198,10 +212,12 @@ class NativeBridge:
         return decode_fdm(packet)
 
     def send_controls(self, aileron, elevator, rudder, throttle,
-                      gear_down=False, brakes=0.0, flaps=0.0, speedbrake=0.0):
+                      gear_down=False, brakes=0.0, flaps=0.0, speedbrake=0.0,
+                      speedup=1):
         packet = encode_ctrls(aileron, elevator, rudder, throttle,
                               gear_down=gear_down, brakes=brakes,
-                              flaps=flaps, speedbrake=speedbrake)
+                              flaps=flaps, speedbrake=speedbrake,
+                              speedup=speedup)
         self._send_sock.sendto(packet, self._send_addr)
 
     def close(self):

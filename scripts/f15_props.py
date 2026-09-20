@@ -147,6 +147,111 @@ def place_obstacles(t, obstacles, hold=None):
     return bool(first)
 
 
+# Radar properties, read from Nasal/awg_9.nas (lines 44/53/63) rather than
+# guessed. this_model is "f15" on this add-on.
+RADAR_DISPLAY = "/sim/model/f15/instrumentation/radar-awg-9/display-rdr"
+RADAR_STANDBY = "/instrumentation/radar/radar-standby"
+RADAR_SERVICEABLE = "/instrumentation/radar/serviceable"
+RADAR_RANGE = "/instrumentation/radar/radar2-range"  # nm; 0 hides everything
+
+
+def designate(t, callsign):
+    """Switch the radar on and have IT designate the target, by callsign.
+
+    This replaces poking armament.contact directly, which can never work:
+    awg_9.nas's rdr_loop() only calls az_scan() when the radar is on and
+    displayed, and its else branch does `armament.contact = nil` EVERY FRAME.
+    Confirmed live -- with a real AI target, awg_9.Target.new() finally
+    returned a hash (the whole point of a scenario-spawned aircraft), but
+    reading armament.contact ~1s later gave nil, because the radar was off and
+    was blanking it continuously.
+
+    The supported path is az_scan() itself: at awg_9.nas:567 it does
+    `active_u = u; armament.contact = active_u;` for whichever scanned target
+    matches active_u_callsign, every scan. So set the callsign and let the
+    radar hold the designation, instead of fighting it. Note that branch also
+    requires u.airbone, and the whole tgts_list rebuild at awg_9.nas:346 nils
+    active_u if its Callsign stops matching active_u_callsign.
+    """
+    t.set(RADAR_SERVICEABLE, 1)
+    t.set(RADAR_STANDBY, 0)
+    t.set(RADAR_DISPLAY, "true")
+    # The radar RANGE SCALE must be set explicitly. az_scan does
+    # `range_radar2 = RangeRadar2.getValue()` and then, at awg_9.nas:329,
+    # `if (range_radar2 == 0) range_radar2 = 0.00000001` -- so an unset scale
+    # does not mean "unlimited", it means effectively ZERO, and the very next
+    # check `if (u_rng > range_radar2) u.set_display(0)` then hides EVERY
+    # target. Confirmed live: with the radar on, tgts_list=1, callsign
+    # matching and airbone=1, the target still had display=0, and the
+    # designation branch only fires for displayed targets -- so
+    # armament.contact stayed nil and the seeker never left SEARCH.
+    t.set(RADAR_RANGE, 40)
+    _nasal(t, f'awg_9.active_u_callsign="{callsign}";')
+    time.sleep(2.0)
+    t.set("/sim/probe/du", "-")
+    _nasal(t, 'setprop("/sim/probe/du",awg_9.active_u==nil?"nil"'
+              ':(""~awg_9.active_u.get_range()~"nm"));')
+    time.sleep(0.4)
+    designated = t.get("/sim/probe/du")
+    print(f"  radar on, designating {callsign}: active_u={designated}")
+    return designated
+
+
+def register_scenario(t, name, path):
+    """Make an AI scenario of OUR OWN loadable, then load it.
+
+    Returns True if FlightGear reports the scenario loaded.
+
+    load-scenario never touches the filesystem. It resolves a name against the
+    catalog at /sim/ai/scenarios, which FGAIManager builds ONCE at startup by
+    scanning FG_ROOT/AI only -- confirmed by dumping it, all 30 entries had
+    path=/app/share/flightgear/AI/*.xml. So a file we write is unreachable no
+    matter where we put it: byte-identical known-good content loaded (rc=1)
+    from FG_ROOT/AI and failed (rc=0) from FG_HOME/AI and from a --data dir,
+    and FG_ROOT is read-only in this flatpak. --ai-scenario on the launch line
+    registers the NAME (/sim/ai/scenario[1]) but still cannot load the file.
+
+    The way in is that each catalog entry carries its own `path`. Appending an
+    entry at runtime makes our file resolvable. The `id` child is the part
+    that matters and the part that is easy to miss: `id` is the filename stem
+    ('aircraft_demo'), `name` is only the human title ('737 takeoff from
+    KSFO/28L'), and load-scenario matches the stem -- an injected entry with
+    {name, path} but no `id` returns rc=0. Confirmed live: with `id` set,
+    rc=1 and three real AI aircraft appeared with radar/in-range=true and a
+    live radar/range-nm, which is exactly the subtree a hand-built
+    /ai/models/aircraft node never had and the reason the seeker never locked.
+
+    Written with telnet `set`, not Nasal: `run nasal script=` is
+    space-delimited and silently truncates at the first space.
+    """
+    # With a WRITABLE FG_ROOT (the AppImage install), the file simply lives in
+    # FG_ROOT/AI and FlightGear registers it at startup -- no injection needed,
+    # and injecting anyway would add a duplicate entry. Only inject when the id
+    # is genuinely absent, so this works on either install.
+    i = 0
+    already = False
+    while True:
+        existing = t.get(f"/sim/ai/scenarios/scenario[{i}]/path")
+        if existing is None:
+            break
+        if t.get(f"/sim/ai/scenarios/scenario[{i}]/id") == name:
+            already = True
+            break
+        i += 1
+    if already:
+        print(f"  {name} already in catalog at scenario[{i}] (FG_ROOT/AI)")
+    else:
+        for key, val in (("id", name), ("name", name), ("path", path)):
+            t.set(f"/sim/ai/scenarios/scenario[{i}]/{key}", val)
+    t.set("/sim/probe/ls", "-")
+    _nasal(t, 'setprop("/sim/probe/ls",""~fgcommand("load-scenario",'
+              f'props.Node.new({{"name":"{name}"}})));')
+    time.sleep(4)
+    rc = t.get("/sim/probe/ls")
+    print(f"  register_scenario({name}) -> rc={rc!r} (catalog entry {i})")
+    return rc == "1"
+
+
 def find_ai_target(t, callsign="BANDIT1", tries=10):
     """Locate the REAL AI aircraft FlightGear spawned from the scenario.
 
@@ -194,6 +299,25 @@ def load_aim9(t):
 
 def arm_aim9(t):
     """Master arm on, AIM-9 selected. Paths verified in weapons.nas."""
+    # The missile's 3D MODEL PATH has to be configured first, or the round
+    # flies invisibly. fox2.nas:331 builds it as
+    #   getprop("payload/armament/models") ~ weapon_model_type ~ "/"
+    #       ~ type_lc ~ "-"
+    # and then (:382) appends the station ID and ".xml". Nothing in the F-15
+    # add-on ever SETS payload/armament/models -- fox2.nas only reads it -- so
+    # it resolves against nil and the model is never found. Confirmed live: a
+    # release put a valid missile in /ai/models but nothing was visible in the
+    # GUI, and FlightGear logged no model load at all.
+    # The real files are Models/Stores/aim-9/aim-9-<ID>.xml (IDs 0/2/8/10,
+    # matching AIM9_STATIONS), so weapon_model_type must be the lowercase
+    # type: useCase on, upperCase off.
+    # These must be set BEFORE load_aim9(), because selecting a station is
+    # what constructs the AIM objects and the path is captured in the
+    # constructor.
+    t.set("/payload/armament/models", "Aircraft/F-15/Models/Stores/")
+    t.set("/payload/armament/modelsUseCase", "true")
+    t.set("/payload/armament/modelsUpperCase", "false")
+    time.sleep(0.3)
     load_aim9(t)
     t.set(MASTER_ARM, 1)
     time.sleep(0.4)

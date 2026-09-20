@@ -14,6 +14,8 @@ cd "$(dirname "$0")/.."
 pkill -9 -f 'python.*f15_intercept|python.*f15_obstacle_run|python.*f15_airshow' 2>/dev/null || true
 pkill -9 -f 'flatpak run.*fgfs' 2>/dev/null || true
 pkill -9 -f 'bwrap.*fgfs' 2>/dev/null || true
+pkill -9 -f 'flightgear.*AppImage' 2>/dev/null || true
+pkill -9 -f '[f]gfs' 2>/dev/null || true
 sleep 3
 
 # FG_START=air (default) spawns at 15000ft already flying -- right for
@@ -38,9 +40,25 @@ if [ -n "${AI_SCENARIO:-}" ]; then
 fi
 
 LOG="${TMPDIR:-/tmp}/fg.log"
-nohup flatpak run --command=fgfs org.flightgear.FlightGear \
+# AppImage + our own writable fgdata, replacing the flatpak. The flatpak's
+# FG_ROOT was read-only, which cost real time: AI scenarios are only loadable
+# if they are in the catalog FGAIManager builds at startup by globbing
+# FG_ROOT/AI, and nothing else is scanned -- byte-identical content loaded
+# (rc=1) from FG_ROOT/AI but failed (rc=0) from FG_HOME/AI and from a --data
+# dir. With a writable FG_ROOT we just drop scenario XML in FG_ROOT/AI and it
+# is picked up normally, no runtime catalog injection needed.
+#
+# --fg-root is safe HERE specifically because the data package version
+# (fgdata_2024_1/version == 2024.1.7) matches the AppImage build exactly. The
+# standing warning about --fg-root triggering an unprompted full re-download
+# applies to a MISMATCHED or overlay directory that fails FlightGear's
+# integrity check, not to a matching data package.
+FG_APPIMAGE="${FG_APPIMAGE:-$HOME/Downloads/flightgear-2024.1.7-linux-amd64.AppImage}"
+FG_ROOT_DIR="${FG_ROOT_DIR:-$HOME/FlightGear/fgdata_2024_1}"
+nohup "$FG_APPIMAGE" \
+  --fg-root="$FG_ROOT_DIR" \
   --fg-aircraft="$HOME/.fgfs/Aircraft" --aircraft=f15c \
-  --airport=KXTA --runway=03L $START_ARGS $SCENARIO_ARGS \
+  --airport="${FG_AIRPORT:-KXTA}" --runway="${FG_RUNWAY:-03L}" $START_ARGS $SCENARIO_ARGS \
   --telnet=5501 --disable-real-weather-fetch --timeofday=noon \
   --native-fdm=socket,out,20,,5504,udp \
   --native-ctrls=socket,in,20,,5505,udp > "$LOG" 2>&1 &
@@ -76,4 +94,6 @@ if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
 fi
 pkill -9 -f 'flatpak run.*fgfs' 2>/dev/null || true
 pkill -9 -f 'bwrap.*fgfs' 2>/dev/null || true
+pkill -9 -f 'flightgear.*AppImage' 2>/dev/null || true
+pkill -9 -f '[f]gfs' 2>/dev/null || true
 exit "$rc"

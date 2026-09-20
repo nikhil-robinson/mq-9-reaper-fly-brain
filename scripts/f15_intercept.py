@@ -69,6 +69,7 @@ Then: .venv/bin/python scripts/f15_intercept.py
 """
 
 import math
+import os
 import socket
 import time
 
@@ -89,6 +90,14 @@ WAYPOINT_DIST_M = 20000.0
 WAYPOINT_RADIUS_M = 300.0
 CAPTURE_WINDOW_M = 2000.0  # inside this, opening range counts as the intercept
 STEP_HZ = 20  # matches --native-fdm/--native-ctrls's ,20, rate
+# Sim seconds per wall second. The flight itself takes a fixed amount of
+# SIMULATED time (~85s for the 20km intercept), and the loop was pinned to
+# wall time by its own sleep(1/STEP_HZ) -- so a run cost ~85s of wall clock
+# no matter how much headroom the machine had. Raising this runs the same
+# flight proportionally faster in real time. It is sent inside FGNetCtrls,
+# NOT set as /sim/speed-up over telnet: see encode_ctrls: our own control
+# packets would overwrite a telnet-set value 20 times a second.
+SPEED_UP = int(os.environ.get("SPEED_UP", "1"))
 MAX_STEPS = 6000  # 5 minutes at 20Hz -- widened waypoint needs more time to close
 
 # Real cause of the altitude collapse, found after the 45deg-cap crash
@@ -253,9 +262,24 @@ class Telnet:
         return self._read_until_prompt()
 
     def get(self, path):
+        """Property value, or None if it does not exist.
+
+        FlightGear's telnet `get` answers a NON-EXISTENT property with an
+        empty quoted value, indistinguishable at the protocol level from a
+        property that exists and is empty. Returning '' for that was a real
+        trap, not a cosmetic one: every caller here tests `is None` to mean
+        "not there", so a missing node read as a truthy-shaped '' instead.
+        Confirmed live -- an index walk over /ai/models/aircraft[i] looking
+        for a scenario-spawned target never terminated, happily reporting
+        aircraft[73] with every field '', and made a run with NO AI aircraft
+        at all look like a run with dozens. find_ai_target() has the same
+        `is None` break, so it would hang the same way.
+        """
         response = self._send(f"get {path}")
         parts = response.split("'")
-        return parts[1] if len(parts) >= 2 else None
+        if len(parts) < 2 or parts[1] == "":
+            return None
+        return parts[1]
 
     def set(self, path, value):
         self._send(f"set {path} {value}")
@@ -435,9 +459,7 @@ def main():
     telem = nb.get_telemetry()
     target_alt_ft = telem["altitude_m"] / 0.3048
 
-    prev_alt_ft = telem["altitude_m"] / 0.3048
     prev_dist = float("inf")
-    prev_time = time.monotonic()
     filtered_climb_rate_fps = 0.0
 
     for step in range(MAX_STEPS):
@@ -449,10 +471,6 @@ def main():
         dist = haversine_m(own_lat, own_lon, target_lat, target_lon)
         want_bearing = bearing_deg(own_lat, own_lon, target_lat, target_lon)
         bearing_err = angle_diff_deg(want_bearing, heading_deg)
-
-        now = time.monotonic()
-        dt = now - prev_time
-        prev_time = now
 
         # With roll CAS active, /controls/flight/aileron is a ROLL RATE
         # command, not a deflection: cas/roll-rate-demand (TM-72861 Fig 21)
@@ -474,9 +492,14 @@ def main():
         airspeed_kt = telem["airspeed_kt"]
         alt_err_ft = effective_target_alt_ft(target_alt_ft, airspeed_kt) - own_alt_ft
 
-        raw_climb_rate_fps = (own_alt_ft - prev_alt_ft) / dt if dt > 0 else 0.0
-        prev_alt_ft = own_alt_ft
-        filtered_climb_rate_fps += ROLL_RATE_FILTER_ALPHA * (raw_climb_rate_fps - filtered_climb_rate_fps)
+        # FlightGear's own climb rate, straight out of the FDM packet. This
+        # used to be (alt - prev_alt) / dt with dt from time.monotonic() --
+        # a WALL-clock derivative, which reads high by exactly SPEED_UP once
+        # sim time and wall time diverge, corrupting the K_CLIMB_G damping
+        # term that stops the altitude oscillation. The filter is kept: the
+        # gains below were tuned against a smoothed signal.
+        filtered_climb_rate_fps += ROLL_RATE_FILTER_ALPHA * (
+            telem["climb_rate_fps"] - filtered_climb_rate_fps)
 
         # Real turn physics, commanded directly instead of tuned blind: a
         # level coordinated turn at bank phi needs load factor n = 1/cos(phi)
@@ -508,7 +531,8 @@ def main():
         # overspeeding, the way a real pilot would in an unintended dive,
         # instead of holding it at THROTTLE unconditionally.
         throttle = THROTTLE if airspeed_kt < 450.0 else 0.2
-        nb.send_controls(aileron=aileron, elevator=elevator, rudder=rudder, throttle=throttle)
+        nb.send_controls(aileron=aileron, elevator=elevator, rudder=rudder,
+                         throttle=throttle, speedup=SPEED_UP)
 
         if step % 20 == 0:
             print(
@@ -544,7 +568,10 @@ def main():
             print(f"CRASHED at step {step}: speed={airspeed_kt:.0f}kt alt={own_alt_ft:.0f}ft (stalled/impacted).")
             break
 
-        time.sleep(1.0 / STEP_HZ)
+        # Under speed-up FlightGear emits STEP_HZ * SPEED_UP packets per
+        # WALL second, so pace off wall time scaled by SPEED_UP -- otherwise
+        # the loop under-samples and re-decodes the same cached packet.
+        time.sleep(1.0 / (STEP_HZ * SPEED_UP))
 
     nb.close()
 
