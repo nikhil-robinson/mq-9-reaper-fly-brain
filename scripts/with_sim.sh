@@ -18,6 +18,11 @@ pkill -9 -f 'flightgear.*AppImage' 2>/dev/null || true
 pkill -9 -f '[f]gfs' 2>/dev/null || true
 sleep 3
 
+# pkill -9 leaves FG_HOME's lock file behind, and the next instance then exits
+# a couple of seconds into startup ("flightgear instance already running") with
+# nothing useful in the log -- it looks exactly like a hang. Clear it.
+rm -f "$HOME/.fgfs/fgfs_lock.pid" "$HOME/.fgfs/fgfs_exclusive.lock" 2>/dev/null || true
+
 # FG_START=air (default) spawns at 15000ft already flying -- right for
 # maneuver work. FG_START=ground spawns on the runway, needed for any
 # sequence that begins with a takeoff or ends with a landing.
@@ -55,8 +60,18 @@ LOG="${TMPDIR:-/tmp}/fg.log"
 # integrity check, not to a matching data package.
 FG_APPIMAGE="${FG_APPIMAGE:-$HOME/Downloads/flightgear-2024.1.7-linux-amd64.AppImage}"
 FG_ROOT_DIR="${FG_ROOT_DIR:-$HOME/FlightGear/fgdata_2024_1}"
+# BOMBABLE: the addon that makes AI aircraft actually fight -- attack the
+# player, take damage and explode. A stock scenario AI aircraft only flies a
+# flightplan and cannot fight back, and a hand-built /ai/models node has no
+# damage model at all. Set BOMBABLE=0 to launch without it.
+BOMBABLE_ADDON="${BOMBABLE_ADDON:-$HOME/FlightGear/addons/Bombable-6.0}"
+ADDON_ARGS=""
+if [ "${BOMBABLE:-1}" = "1" ] && [ -d "$BOMBABLE_ADDON" ]; then
+    ADDON_ARGS="--addon=$BOMBABLE_ADDON"
+fi
+
 nohup "$FG_APPIMAGE" \
-  --fg-root="$FG_ROOT_DIR" \
+  --fg-root="$FG_ROOT_DIR" $ADDON_ARGS \
   --fg-aircraft="$HOME/.fgfs/Aircraft" --aircraft=f15c \
   --airport="${FG_AIRPORT:-KXTA}" --runway="${FG_RUNWAY:-03L}" $START_ARGS $SCENARIO_ARGS \
   --telnet=5501 --disable-real-weather-fetch --timeofday=noon \

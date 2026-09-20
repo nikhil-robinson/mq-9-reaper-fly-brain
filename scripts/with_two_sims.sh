@@ -38,8 +38,29 @@ VIS_ARGS="--disable-random-objects --disable-ai-traffic
           --prop:/sim/rendering/texture-compression=on
           --geometry=640x480"
 
+# EACH INSTANCE NEEDS ITS OWN FG_HOME. FlightGear flock()s FG_HOME, so a
+# second instance sharing it prints "flightgear instance already running,
+# switching to FG_HOME read-only", loses TerraSync, and comes up crippled --
+# confirmed live, and it is what made RED's startup erratic (8s one run, 46s
+# the next) and is the likely cause of a driver process dying mid-run.
+# HEADLESS=<callsign> renders that instance into an Xvfb virtual framebuffer:
+# no visible window, no GPU contention with the other instance. It does NOT
+# make FlightGear headless in any real sense -- there is no such mode, and the
+# genuinely headless option (JSBSim standalone) runs flight dynamics with no
+# Nasal, so RED would lose fox2.nas and its missiles would stop being real,
+# which is the whole reason there are two instances. Scenery, terrain, Nasal
+# and the aircraft model all still load, so the saving is the GL client
+# buffers and compositing, not the bulk of the footprint.
+HEADLESS="${HEADLESS:-RED1}"
+
 launch() {  # $1=callsign $2=telnet $3=fdm $4=ctrls $5=mp_in $6=mp_out $7=lat $8=lon $9=hdg
-    nohup "$FG_APPIMAGE" \
+    mkdir -p "$HOME/.fgfs_$1"
+    local WRAP=""
+    if [ "$1" = "$HEADLESS" ] && command -v xvfb-run >/dev/null 2>&1; then
+        WRAP="xvfb-run -a -s -screen 0 640x480x24"
+        echo "  $1 -> offscreen (xvfb)"
+    fi
+    FG_HOME="$HOME/.fgfs_$1" nohup $WRAP "$FG_APPIMAGE" \
       --fg-root="$FG_ROOT_DIR" \
       --fg-aircraft="$HOME/.fgfs/Aircraft" --aircraft=f15c \
       --callsign="$1" \
