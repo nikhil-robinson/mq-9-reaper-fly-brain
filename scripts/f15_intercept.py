@@ -73,6 +73,7 @@ import os
 import socket
 import time
 
+from fly_brain.geo import angle_diff_deg, bearing_deg, haversine_m, offset_point
 from fly_brain.native_protocol import NativeBridge
 
 TELNET_HOST = "localhost"
@@ -289,39 +290,6 @@ class Telnet:
 
     def close(self):
         self._sock.close()
-
-
-def haversine_m(lat1, lon1, lat2, lon2):
-    R = 6371000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(a))
-
-
-def bearing_deg(lat1, lon1, lat2, lon2):
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dlambda = math.radians(lon2 - lon1)
-    y = math.sin(dlambda) * math.cos(p2)
-    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dlambda)
-    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
-
-
-def angle_diff_deg(a, b):
-    return (a - b + 180.0) % 360.0 - 180.0
-
-
-def offset_point(lat, lon, heading_deg, dist_m):
-    R = 6371000.0
-    hr = math.radians(heading_deg)
-    dr = dist_m / R
-    lat1, lon1 = math.radians(lat), math.radians(lon)
-    lat2 = math.asin(math.sin(lat1) * math.cos(dr) + math.cos(lat1) * math.sin(dr) * math.cos(hr))
-    lon2 = lon1 + math.atan2(
-        math.sin(hr) * math.sin(dr) * math.cos(lat1), math.cos(dr) - math.sin(lat1) * math.sin(lat2)
-    )
-    return math.degrees(lat2), math.degrees(lon2)
 
 
 def startup(t):
