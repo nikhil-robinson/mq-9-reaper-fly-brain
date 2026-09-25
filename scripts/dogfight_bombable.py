@@ -205,16 +205,28 @@ def main():
     # the way to 771kt before the loop noticed -- a real fighter at max
     # afterburner genuinely accelerates that fast, so the polling has to be
     # tight enough to catch it, not just the throttle command corrected.
+    # Throttle back to a MODEST cruise setting well before the target, with a
+    # wide margin: every t.get()/t.set() here is a real telnet round trip
+    # (tens to hundreds of ms), and under speed-up that latency alone lets a
+    # fighter at full afterburner gain a real chunk of speed between "we
+    # decided to back off" and "the throttle command actually lands" --
+    # confirmed live, backing off to 0.7 exactly AT the threshold still
+    # overshot to 709-771kt. Backing off to near-idle (0.3) a full 100kt
+    # early leaves enough margin to absorb that latency.
+    throttled_back = False
+    final_spd = 0.0
     for _ in range(150):
         spd = float(t.get("/velocities/airspeed-kt") or 0)
+        final_spd = spd
+        if not throttled_back and spd >= CORNER_SPEED_KT - 140:
+            t.set("/controls/engines/engine[0]/throttle", 0.3)
+            t.set("/controls/engines/engine[1]/throttle", 0.3)
+            throttled_back = True
         if spd >= CORNER_SPEED_KT - 40:
-            t.set("/controls/engines/engine[0]/throttle", 0.7)
-            t.set("/controls/engines/engine[1]/throttle", 0.7)
             break
         time.sleep(0.2)
     print("  at %.0fft / %.0fkt, taking the stick" % (
-        float(t.get("/position/altitude-ft")),
-        float(t.get("/velocities/airspeed-kt") or 0)), flush=True)
+        float(t.get("/position/altitude-ft") or 0), final_spd), flush=True)
 
     connect_stick(t)     # release the autopilot -- the loop starts NOW
 
