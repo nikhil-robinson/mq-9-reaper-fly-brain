@@ -25,7 +25,13 @@ GUN_MAX_NM = 0.6
 GUN_FOV_DEG = 2.5
 # Max instantaneous turn rate is at corner speed: slower and there is not
 # enough lift to pull g, faster and the turn radius blows up.
-CORNER_SPEED_KT = 430.0
+# The Bombable AI spawns and typically cruises around 400kt (see
+# data/bombable_dogfight.xml). 430kt left almost no speed margin to actually
+# close on or out-turn an opponent already near that speed, especially once
+# our own jet dips into RESET/RECOVER during real maneuvering (which costs
+# energy the same way it would for the AI). Raised for real speed
+# superiority, not just parity.
+CORNER_SPEED_KT = 500.0
 
 STALL_SPEED_KT = 180.0          # 1g stall speed; n_max = (V/Vs)^2
 CAS_ROLL_RATE_FULL_DPS = 213.1  # aileron=1.0 commands this via the roll CAS
@@ -80,8 +86,8 @@ TURN_LIFT_BUDGET = 0.8
 # cap (which bounds how long an extend can run once triggered, fixing the
 # EARLIER bug of extending forever), but high enough to actually engage when
 # speed sags meaningfully below corner speed rather than just above stall.
-ENERGY_FLOOR_KT = 280.0
-ENERGY_RECOVER_KT = 350.0   # hysteresis: recover to here before fighting again
+ENERGY_FLOOR_KT = 320.0
+ENERGY_RECOVER_KT = 400.0   # hysteresis: recover to here before fighting again
 RESET_MAX_STEPS = 40        # hard cap: ~2s of sim time at 20Hz, however fast
                             # the arena's own loop actually runs -- RESET
                             # commits to a short, decisive unload, not an

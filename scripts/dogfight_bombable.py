@@ -353,10 +353,11 @@ def main():
                       kills), flush=True)
             # Enemy heading vs bearing-to-us answers "is it chasing me?"
             back = bearing_deg(target["lat"], target["lon"], own_lat, own_lon)
-            print("      %s hdg=%.0f bearing_to_us=%.0f aspect=%+.0f firing=%s" % (
-                target["callsign"], target["heading"], back,
-                angle_diff_deg(back, target["heading"]),
-                target.get("firing", False)), flush=True)
+            print("      %s hdg=%.0f spd=%.0f bearing_to_us=%.0f aspect=%+.0f "
+                  "firing=%s (us: spd=%.0f)" % (
+                target["callsign"], target["heading"], target["speed_kt"],
+                back, angle_diff_deg(back, target["heading"]),
+                target.get("firing", False), telem["airspeed_kt"]), flush=True)
 
         time.sleep(1.0 / (STEP_HZ * SPEED_UP))
     else:

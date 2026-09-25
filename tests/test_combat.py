@@ -282,10 +282,10 @@ def test_a_slow_jet_stops_turning_and_rebuilds_energy():
 
 def test_energy_state_has_hysteresis_so_it_does_not_chatter():
     p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
-    p.step(_telem(airspeed_kt=260.0), NO_THREAT)          # enters RESET
-    mid = p.step(_telem(airspeed_kt=310.0), NO_THREAT)     # between the bands
-    assert mid.state == "RESET", "must not re-enter the fight at 310kt"
-    back = p.step(_telem(airspeed_kt=360.0), NO_THREAT)    # above recover band
+    p.step(_telem(airspeed_kt=300.0), NO_THREAT)          # enters RESET
+    mid = p.step(_telem(airspeed_kt=360.0), NO_THREAT)     # between the bands
+    assert mid.state == "RESET", "must not re-enter the fight at 360kt"
+    back = p.step(_telem(airspeed_kt=420.0), NO_THREAT)    # above recover band
     assert back.state in ("ENGAGE", "INTERCEPT")
 
 
