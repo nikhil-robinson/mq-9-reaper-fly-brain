@@ -72,8 +72,16 @@ TURN_LIFT_BUDGET = 0.8
 # real seconds at a stretch, either slow-circling or (once that was fixed)
 # ballooning on leftover vertical momentum while decelerating, and never
 # closing back in on the target during that whole window.
-ENERGY_FLOOR_KT = 200.0
-ENERGY_RECOVER_KT = 230.0   # hysteresis: recover to here before fighting again
+# Confirmed live: 200/230kt let the jet cruise an ENTIRE fight at 230-260kt
+# average (never above 421kt across a ~300-sample run) without ever
+# triggering a real extend, because it was always above this floor -- far
+# below CORNER_SPEED_KT=430, and far less capable of hard maneuvering than
+# it should be. The floor has to be low enough to not fight the RESET_STEPS
+# cap (which bounds how long an extend can run once triggered, fixing the
+# EARLIER bug of extending forever), but high enough to actually engage when
+# speed sags meaningfully below corner speed rather than just above stall.
+ENERGY_FLOOR_KT = 280.0
+ENERGY_RECOVER_KT = 350.0   # hysteresis: recover to here before fighting again
 RESET_MAX_STEPS = 40        # hard cap: ~2s of sim time at 20Hz, however fast
                             # the arena's own loop actually runs -- RESET
                             # commits to a short, decisive unload, not an
