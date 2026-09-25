@@ -157,26 +157,34 @@ def main():
     # military power (faster still with afterburner), and speed-with-throttle
     # was taking well over that. Command throttle directly instead and skip
     # the autopilot speed lock entirely for this phase.
-    t.set("/controls/engines/engine[0]/throttle", 1.0)
-    t.set("/controls/engines/engine[1]/throttle", 1.0)
-    time.sleep(1)
+    # Do NOT set throttle to 1.0 here. Confirmed live, TWICE: setting full
+    # throttle this early, before enable_bombable()/arm_aim9()/radar setup
+    # (which is itself several real seconds of telnet round trips) and THEN
+    # turning on 4x speed-up, meant the jet was already accelerating at full
+    # military power under 4x sim time through that entire setup window --
+    # by the time the dedicated accelerate loop below took its first
+    # airspeed reading, real speed was already 700+kt, regardless of how
+    # tightly that loop polled or how early it throttled back, because the
+    # overshoot had already happened before the loop ever started.
+    # Throttle is explicitly held at a known, safe, low value through this
+    # setup window instead (not full power, and not left to whatever
+    # quickstart() happens to default to, which was never verified) -- it is
+    # only pushed to full power immediately before the dedicated accelerate
+    # loop, right when we actually want to start climbing toward combat speed.
+    t.set("/controls/engines/engine[0]/throttle", 0.4)
+    t.set("/controls/engines/engine[1]/throttle", 0.4)
 
     # Speed up sim time NOW, not before startup(). The crash traced earlier
     # was from applying it during quickstart()/engine-crank, a genuinely
-    # fragile transient. Here the engines are confirmed running, the FCS is
-    # already proven connected (startup()'s own connect_stick() call already
-    # succeeded once), and every axis is now under FlightGear's own internal
-    # autopilot PID (altitude-hold, true-heading-hold, speed-with-throttle) --
-    # those are driven by sim-time ticks inside FlightGear itself, not by our
-    # wall-clock time.sleep() polling, so they should track correctly under
-    # speed-up. This is what actually shortens the dominant remaining setup
-    # cost: accelerating from the ~300kt spawn speed to combat speed is real
-    # vehicle dynamics, not a fixed timer, and was taking the bulk of the
-    # 20-60+ real seconds between SIM READY and the first control-loop step.
+    # fragile transient. Here the engines are confirmed running and the FCS
+    # is already proven connected (startup()'s own connect_stick() call
+    # already succeeded once), and with throttle left low, this setup window
+    # is not accelerating the jet, only running (fast) telnet round trips --
+    # so there is nothing here for speed-up to desync.
     if SPEED_UP > 1:
         t.set("/sim/speed-up", SPEED_UP)
-        print("  sim speed-up=%sx (engines confirmed, FCS proven, now under "
-              "FlightGear's own autopilot PIDs -- should track correctly)"
+        print("  sim speed-up=%sx (engines confirmed, FCS proven, throttle "
+              "still low -- nothing here for speed-up to desync)"
               % SPEED_UP, flush=True)
 
     enable_bombable(t)
@@ -199,6 +207,10 @@ def main():
     # fight starts.
     print("  accelerating to %.0fkt before taking the stick" % CORNER_SPEED_KT,
           flush=True)
+    # NOW push to full power -- not earlier. This is the actual accelerate
+    # phase, timed to start right as we begin polling for it.
+    t.set("/controls/engines/engine[0]/throttle", 1.0)
+    t.set("/controls/engines/engine[1]/throttle", 1.0)
     # Poll frequently and throttle back the INSTANT the target is reached.
     # Confirmed live: full throttle under 4x sim speed-up, checked only every
     # 2 REAL seconds (8 sim-seconds), overshot the 390kt exit threshold all
