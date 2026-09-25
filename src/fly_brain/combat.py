@@ -63,8 +63,21 @@ TURN_LIFT_BUDGET = 0.8
 # even at full throttle, and available g fell 4.18 -> 1.90 with it, until the
 # bank being held needed more lift than existed. A turning fight is an energy
 # fight, and a controller that only ever points at the enemy loses it.
-ENERGY_FLOOR_KT = 300.0
-ENERGY_RECOVER_KT = 360.0   # hysteresis: recover to here before fighting again
+# Genuinely near-stall only, and CAPPED in duration -- see step()'s
+# RESET handling for why. A real fighter turning to engage a single,
+# comparably-slow opponent (this Bombable AI cruises around 300-400kt)
+# essentially never needs a deliberate multi-second disengage-and-extend;
+# it only needs to not literally stall. Multiple live runs with a wider
+# floor/recover band (330/400, then 300/360) got stuck in RESET for 30-90+
+# real seconds at a stretch, either slow-circling or (once that was fixed)
+# ballooning on leftover vertical momentum while decelerating, and never
+# closing back in on the target during that whole window.
+ENERGY_FLOOR_KT = 200.0
+ENERGY_RECOVER_KT = 230.0   # hysteresis: recover to here before fighting again
+RESET_MAX_STEPS = 40        # hard cap: ~2s of sim time at 20Hz, however fast
+                            # the arena's own loop actually runs -- RESET
+                            # commits to a short, decisive unload, not an
+                            # open-ended extend the geometry can wander during
 
 
 MAX_LEAD_TIME_SEC = 20.0
@@ -170,6 +183,7 @@ class CombatPilot:
         self.flares_used = 0
         self.missiles_fired = 0
         self._low_energy = False
+        self._reset_steps = 0  # how long we have been in RESET, see step()
         self._turn_dir = 1.0  # committed turn direction, see step()
 
     def g_available(self, airspeed_kt):
@@ -294,12 +308,23 @@ class CombatPilot:
             )
 
         # ENERGY before geometry. Hysteresis so it does not chatter in and out
-        # of the fight at the threshold.
-        if telem["airspeed_kt"] < ENERGY_FLOOR_KT:
+        # of the fight at the threshold, PLUS a hard step cap: without one, a
+        # wide hysteresis band let RESET run for 30-90+ real seconds straight
+        # in live testing, moving the geometry so far in the meantime that it
+        # never converged back into a fight. A committed pilot takes the
+        # unload it needs and gets back to business -- it does not wait for a
+        # perfect energy number while the target wanders off.
+        if telem["airspeed_kt"] < ENERGY_FLOOR_KT and not self._low_energy:
             self._low_energy = True
-        elif telem["airspeed_kt"] > ENERGY_RECOVER_KT:
+            self._reset_steps = 0  # only reset on the TRANSITION into RESET,
+                                    # not every step while still slow -- doing
+                                    # it unconditionally meant the step cap
+                                    # below could never fire for a jet that
+                                    # simply never got fast again on its own.
+        elif telem["airspeed_kt"] > ENERGY_RECOVER_KT or self._reset_steps > RESET_MAX_STEPS:
             self._low_energy = False
         if self._low_energy:
+            self._reset_steps += 1
             self.state = "RESET"
             # EXTEND STRAIGHT, wings level, to rebuild energy as fast as
             # possible. A shallow constant bank toward the target's bearing

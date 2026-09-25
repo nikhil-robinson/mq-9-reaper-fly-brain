@@ -3,6 +3,7 @@ from fly_brain.combat import (
     AIM9_FOV_DEG,
     CORNER_SPEED_KT,
     CombatPilot,
+    RESET_MAX_STEPS as RESET_MAX_STEPS_TEST,
     aim9_in_envelope,
     corner_throttle,
     gun_in_envelope,
@@ -270,7 +271,7 @@ def test_a_slow_jet_stops_turning_and_rebuilds_energy():
     the nose held the jet in a wide closed loop for 30+ seconds, with range
     climbing from 11nm to 17nm and never closing."""
     p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
-    cmd = p.step(_telem(alt_ft=15000.0, agl_ft=9000.0, airspeed_kt=280.0,
+    cmd = p.step(_telem(alt_ft=15000.0, agl_ft=9000.0, airspeed_kt=180.0,
                         roll_deg=40.0,
                         tgt_lat=37.05, tgt_lon=-114.90), NO_THREAT)
     assert cmd.state == "RESET"
@@ -281,10 +282,10 @@ def test_a_slow_jet_stops_turning_and_rebuilds_energy():
 
 def test_energy_state_has_hysteresis_so_it_does_not_chatter():
     p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
-    p.step(_telem(airspeed_kt=280.0), NO_THREAT)          # enters RESET
-    mid = p.step(_telem(airspeed_kt=340.0), NO_THREAT)     # between the bands
-    assert mid.state == "RESET", "must not re-enter the fight at 340kt"
-    back = p.step(_telem(airspeed_kt=380.0), NO_THREAT)    # above recover band
+    p.step(_telem(airspeed_kt=180.0), NO_THREAT)          # enters RESET
+    mid = p.step(_telem(airspeed_kt=210.0), NO_THREAT)     # between the bands
+    assert mid.state == "RESET", "must not re-enter the fight at 210kt"
+    back = p.step(_telem(airspeed_kt=250.0), NO_THREAT)    # above recover band
     assert back.state in ("ENGAGE", "INTERCEPT")
 
 
@@ -399,8 +400,26 @@ def test_reset_is_truly_unloaded_not_altitude_corrected():
     quietly loaded the whole time."""
     p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
     # far below and far above the (irrelevant, for RESET) target altitude
-    low = p.step(_telem(alt_ft=8000.0, airspeed_kt=280.0), NO_THREAT)
-    high = p.step(_telem(alt_ft=20000.0, airspeed_kt=280.0), NO_THREAT)
+    low = p.step(_telem(alt_ft=8000.0, airspeed_kt=180.0), NO_THREAT)
+    high = p.step(_telem(alt_ft=20000.0, airspeed_kt=180.0), NO_THREAT)
     assert low.state == "RESET" and high.state == "RESET"
     assert low.g_cmd == 1.0
     assert high.g_cmd == 1.0
+
+
+def test_reset_is_hard_capped_in_duration():
+    """Without a cap, a wide hysteresis band let RESET run for 30-90+ real
+    seconds straight in live testing -- either slow-circling (before the
+    wings-level fix) or ballooning on leftover vertical momentum while
+    decelerating (after it), and the geometry moved so far in the meantime
+    that the fight never converged. A committed pilot takes the unload it
+    needs and gets back to business."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    telem_slow = _telem(airspeed_kt=100.0)  # stays well under the floor
+    for _ in range(RESET_MAX_STEPS_TEST + 1):
+        cmd = p.step(telem_slow, NO_THREAT)
+        assert cmd.state == "RESET"
+    # one more step past the cap must exit RESET even though airspeed never
+    # crossed ENERGY_RECOVER_KT
+    cmd = p.step(telem_slow, NO_THREAT)
+    assert cmd.state != "RESET"
