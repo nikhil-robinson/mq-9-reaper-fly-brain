@@ -67,8 +67,18 @@ NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
 # terrain that sits at ~5400ft.
 K_ALT_G = 1.0 / 4000.0   # g of extra pull per ft of altitude error
 K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
-MAX_ALT_CORRECTION_G = 2.0  # cap so altitude/climb damping nudges the
-                             # engagement turn instead of overriding it
+# 2.0 was chosen only to stop the correction from CANCELLING a normal turn
+# (see the g_cmd comment below) -- it was never meant to also be the ceiling
+# against a genuinely runaway climb, and confirmed live it is not: with
+# hard_pull_g reaching 6-8g in a hard turn, a capped -2g correction cannot
+# outvote it, and the jet zoomed from ~14,000ft to 48,000ft over one
+# engagement, unable to arrest the climb at any point. Raised so the
+# correction can actually win once genuinely far out of position, while
+# staying inert for ordinary drift: at a realistic +/-2000ft engagement
+# error the raw term is only ~0.5g either way, so raising the ceiling alone
+# changes nothing for normal maneuvering -- it only matters once alt_err or
+# climb_rate is large enough to need real intervention.
+MAX_ALT_CORRECTION_G = 6.0
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -274,6 +284,15 @@ class CombatPilot:
     def step(self, telem, threat):
         if self._fire_cooldown > 0:
             self._fire_cooldown -= 1
+        # Track the ACTUAL target's altitude, not a stale spawn-time
+        # constant. target_alt_ft used to be set once in __init__ and never
+        # touched again, so a chase against an enemy thousands of feet away
+        # from wherever we happened to spawn had the altitude correction
+        # fighting for a number with nothing to do with the fight -- one
+        # cause (not the only one, see MAX_ALT_CORRECTION_G) of a live run
+        # zoom-climbing to 48,000ft chasing a target actually near 16,000ft.
+        if "tgt_alt_ft" in telem:
+            self.target_alt_ft = telem["tgt_alt_ft"]
         aim = lead_bearing_deg(telem["lat"], telem["lon"], telem["airspeed_kt"],
                                telem["tgt_lat"], telem["tgt_lon"],
                                telem["tgt_heading_deg"], telem["tgt_speed_kt"])

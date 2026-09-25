@@ -322,6 +322,7 @@ def main():
             climb_rate_fps=telem["climb_rate_fps"],
             tgt_lat=target["lat"], tgt_lon=target["lon"],
             tgt_heading_deg=target["heading"], tgt_speed_kt=target["speed_kt"],
+            tgt_alt_ft=target["alt_ft"],
             tgt_range_nm=rng_nm,
             has_lock=has_lock,
         ), threat)
