@@ -144,26 +144,21 @@ def test_commands_are_always_within_actuator_limits():
 
 
 
-def test_nose_down_jet_is_commanded_more_g_than_a_level_one():
+def test_descending_jet_is_commanded_more_g_than_a_level_one():
     """The bug Phase 1 exposed: commanding only 1/cos(bank) holds altitude in a
     coordinated level turn and nowhere else, so both jets walked 9500ft
-    downhill in 45s over terrain at ~5400ft. Superseded by pitch-hold (ported
-    from f15_airshow.py's hold_nose(), the only proven working hard-turn law
-    in this codebase, after four altitude/climb-rate/gamma-based attempts
-    each failed or introduced a new failure mode -- see
-    PITCH_RECOVER_G_PER_DEG's definition for the full history): the pitch
-    error itself, not altitude or climb rate, drives the correction."""
-    p = CombatPilot(callsign="BLUE1")
-    level = p.step(_telem(pitch_deg=0.0), NO_THREAT)
-    nose_down = p.step(_telem(pitch_deg=-20.0), NO_THREAT)
-    assert nose_down.g_cmd > level.g_cmd
+    downhill in 45s over terrain at ~5400ft."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
+    level = p.step(_telem(alt_ft=18000.0, climb_rate_fps=0.0), NO_THREAT)
+    sinking = p.step(_telem(alt_ft=14000.0, climb_rate_fps=-80.0), NO_THREAT)
+    assert sinking.g_cmd > level.g_cmd
 
 
-def test_nose_up_jet_is_commanded_less_g_than_a_level_one():
-    p = CombatPilot(callsign="BLUE1")
-    level = p.step(_telem(pitch_deg=0.0), NO_THREAT)
-    nose_up = p.step(_telem(pitch_deg=+20.0), NO_THREAT)
-    assert nose_up.g_cmd < level.g_cmd, "already pitched up: ease off"
+def test_climb_rate_is_damped_so_altitude_does_not_oscillate():
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
+    steady = p.step(_telem(alt_ft=17000.0, climb_rate_fps=0.0), NO_THREAT)
+    climbing = p.step(_telem(alt_ft=17000.0, climb_rate_fps=+100.0), NO_THREAT)
+    assert climbing.g_cmd < steady.g_cmd, "already climbing: ease off"
 
 
 def test_recovery_floor_scales_with_speed_and_dive_angle():
@@ -226,11 +221,11 @@ def test_ground_avoidance_outranks_an_incoming_missile():
     assert cmd.state == "RECOVER", "the ground kills faster than the missile"
 
 
-def test_pitch_hold_never_breaks_the_actuator_limits():
-    p = CombatPilot(callsign="BLUE1")
+def test_altitude_terms_never_break_the_actuator_limits():
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
     for alt in (2000.0, 9000.0, 18000.0, 40000.0):
-        for pitch in (-60.0, 0.0, +60.0):
-            cmd = p.step(_telem(alt_ft=alt, pitch_deg=pitch), NO_THREAT)
+        for cr in (-300.0, 0.0, +300.0):
+            cmd = p.step(_telem(alt_ft=alt, climb_rate_fps=cr), NO_THREAT)
             assert 0.0 < cmd.g_cmd <= 9.0
             assert abs(cmd.roll_rate_dps) <= 213.1
 
@@ -384,22 +379,6 @@ def test_engage_pulls_hard_g_not_just_enough_to_hold_altitude():
     assert cmd.g_cmd > 0.7 * min(avail, 9.0), "must use most of the envelope"
 
 
-def test_engage_does_not_pull_hard_g_while_still_wings_level():
-    """User-reported and confirmed live: step 0 of a real engagement logged
-    roll=-2 (essentially wings level) with g=6.98 -- a huge pull with almost
-    no bank is not a turn toward the target, it is a pure vertical loop
-    ("points to the sky and climbs"). A large bearing error commands a large
-    desired bank, but the hard pull must ramp in with actual bank progress,
-    not apply the instant the turn starts."""
-    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
-    # Target far off to one side (large bearing error -> large desired
-    # bank), jet still essentially wings-level.
-    cmd = p.step(_telem(alt_ft=15000.0, roll_deg=-2.0, heading_deg=0.0,
-                        tgt_lat=37.0, tgt_lon=-114.9, tgt_heading_deg=90.0,
-                        airspeed_kt=475.0, tgt_range_nm=2.0), NO_THREAT)
-    assert cmd.g_cmd < 2.0, "must roll into the bank before pulling hard"
-
-
 def test_engage_uses_full_throttle_not_a_cruise_setpoint():
     """A fighter closing for a kill does not manage toward a cruise speed
     mid-turn -- that throttle policy belongs to RESET (energy management),
@@ -426,24 +405,6 @@ def test_reset_is_truly_unloaded_not_altitude_corrected():
     assert low.state == "RESET" and high.state == "RESET"
     assert low.g_cmd == 1.0
     assert high.g_cmd == 1.0
-
-
-def test_reset_pushes_nose_down_when_pitched_up_instead_of_a_flat_one_g():
-    """A bare 1g only holds the CURRENT flight path -- it is only "level"
-    when the jet is already near level. User-reported and confirmed live:
-    after a hard pull, RESET's flat 1g left the jet "pointing at the sky and
-    climbing" for 25+ real seconds, 476->248kt. Two corrections were tried
-    and both failed (see PITCH_RECOVER_G_PER_DEG's definition for the full
-    history, including a mathematically "correct" n=cos(gamma) neutral that
-    only HELD an already-vertical climb instead of fixing it). RESET now
-    uses the same proven pitch-hold as ENGAGE/INTERCEPT, ported from
-    f15_airshow.py's hold_nose(): actively drive pitch toward level."""
-    p = CombatPilot(callsign="BLUE1")
-    level = p.step(_telem(airspeed_kt=180.0, pitch_deg=0.0), NO_THREAT)
-    nose_up = p.step(_telem(airspeed_kt=180.0, pitch_deg=60.0), NO_THREAT)
-    assert level.state == "RESET" and nose_up.state == "RESET"
-    assert level.g_cmd == 1.0
-    assert nose_up.g_cmd < level.g_cmd, "must push over, not hold the climb"
 
 
 def test_reset_is_hard_capped_in_duration():

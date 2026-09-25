@@ -60,21 +60,13 @@ HARD_TURN_FRACTION = 0.9        # fraction of available g to pull while
 NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
                                  # turn direction rather than re-deriving sign
 
-# PITCH-HOLD, not altitude/climb-rate PID -- ported directly from
-# f15_airshow.py's hold_nose(), the only place in this codebase that
-# reliably flies hard turns without ballooning. Four separate attempts to
-# fix uncontrolled climbing via an altitude/climb-rate/gamma correction on
-# top of the turn's g all failed or introduced a new failure mode (climb-rate
-# damping cancelling the turn; an output cap too weak to stop a runaway then
-# too strong once one was legitimate; a 0.3g floor that still coasted upward
-# for several seconds; a mathematically-correct cos(gamma) NEUTRAL that only
-# holds whatever flight-path angle already exists instead of fixing a bad
-# one). airshow's actual proven law is much simpler: drive PITCH toward a
-# target (usually level) as a direct additive g term on top of the turn's
-# own bank-holding g, every step, regardless of altitude or climb rate.
-# User confirmed live: "my airshow script all does high speed turns [and]
-# doesn't do that [climb]." Reuse it instead of re-deriving it worse.
-PITCH_RECOVER_G_PER_DEG = 0.05  # g of push/pull per degree of pitch error
+# Altitude terms, carried over from the intercept law where they were proven.
+# A dogfight still has to not fly into the ground: confirmed live that
+# commanding only 1/cos(bank) -- correct for a coordinated level turn and
+# nothing else -- walked both jets from 17900ft down to 8400ft in 45s, on
+# terrain that sits at ~5400ft.
+K_ALT_G = 1.0 / 4000.0   # g of extra pull per ft of altitude error
+K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -194,6 +186,12 @@ Command = namedtuple("Command", "g_cmd roll_rate_dps throttle "
                                 "fire_missile fire_gun flares state")
 
 
+def alt_err_g(pilot, telem):
+    """Altitude-hold contribution to the g demand, shared by every state."""
+    return ((pilot.target_alt_ft - telem["alt_ft"]) * K_ALT_G
+            - telem["climb_rate_fps"] * K_CLIMB_G)
+
+
 class CombatPilot:
     """One dogfight policy, flown by BOTH jets.
 
@@ -274,14 +272,6 @@ class CombatPilot:
     def step(self, telem, threat):
         if self._fire_cooldown > 0:
             self._fire_cooldown -= 1
-        # Track the ACTUAL target's altitude, not a stale spawn-time
-        # constant. Kept up to date mainly so callers (e.g. the startup log
-        # line "defending Xft") reflect the real fight, not a spawn-time
-        # snapshot -- g_cmd itself no longer uses this (see
-        # PITCH_RECOVER_G_PER_DEG's definition for why altitude tracking
-        # was dropped from the g law entirely).
-        if "tgt_alt_ft" in telem:
-            self.target_alt_ft = telem["tgt_alt_ft"]
         aim = lead_bearing_deg(telem["lat"], telem["lon"], telem["airspeed_kt"],
                                telem["tgt_lat"], telem["tgt_lon"],
                                telem["tgt_heading_deg"], telem["tgt_speed_kt"])
@@ -376,41 +366,17 @@ class CombatPilot:
             # closing or re-engaging. Unloading (low g) and rolling wings
             # level converts the energy budget straight into airspeed instead
             # of spending it holding a turn that goes nowhere useful.
-            # g_cmd is a bare 1.0 (true unloaded flight), NOT 1.0 plus an
-            # altitude-hold correction term. Confirmed live: an earlier
-            # altitude-based correction here kept demanding climb/descent
+            # g_cmd is a bare 1.0 (true unloaded flight), NOT 1.0 plus the
+            # altitude-hold correction term used everywhere else. Confirmed
+            # live: adding alt_err_g here kept demanding climb/descent
             # correction g the entire time, which is directly counter to an
             # extend -- any g above the true minimum induces drag and costs
             # exactly the energy this state exists to rebuild. The result was
             # a monotonic speed bleed from 280kt to 144kt over 78 REAL
             # seconds of RESET that never once recovered, because the
             # "extend" was still quietly loaded the whole time.
-            #
-            # But a bare 1.0 assumes the jet is already near level. It is
-            # not, whenever RESET is entered mid-zoom: user-reported and
-            # confirmed live -- after a hard pull the jet kept "pointing at
-            # the sky and climbing" for 25+ seconds at RESET's flat 1g,
-            # 476->248kt, because 1g only holds the CURRENT flight path, and
-            # the current flight path was a steep climb, not level flight.
-            # Two earlier attempts at a correction (shedding g by pitch, then
-            # by the mathematically "correct" n=cos(gamma) neutral) both
-            # failed: the first used the wrong angle, and the second, even
-            # though correct in isolation, only HOLDS whatever flight path
-            # already exists instead of fixing a bad one -- confirmed live,
-            # g_cmd sat at exactly 0.00 for 13+ real seconds while gamma
-            # stayed pinned near 90deg the entire time, because n=0 at
-            # gamma=90 has zero curvature (dgamma/dt = g*(0-0)/V = 0): it
-            # holds a vertical climb perfectly steady instead of arcing it
-            # over. f15_airshow.py's hold_nose() -- the only proven,
-            # currently-working hard-turn law in this codebase -- solves
-            # exactly this by driving PITCH toward level as a direct additive
-            # g term, not by trying to hold or infer a flight-path neutral.
-            # Reused verbatim (target pitch 0, level_turn_g as the base).
-            level_turn_g = 1.0 / max(0.15, math.cos(math.radians(telem["roll_deg"])))
-            g_cmd = level_turn_g + PITCH_RECOVER_G_PER_DEG * (0.0 - telem["pitch_deg"])
-            g_cmd = max(0.0, min(avail, g_cmd))
             return Command(
-                g_cmd=g_cmd,
+                g_cmd=1.0,
                 roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],
                                             telem["airspeed_kt"]),
                 throttle=1.0,
@@ -453,35 +419,13 @@ class CombatPilot:
         # correction terms so this does not reopen the "walks downhill while
         # turning level" bug the floor term originally fixed.
         level_turn_g = 1.0 / max(0.2, math.cos(math.radians(telem["roll_deg"])))
-        hard_pull_g_full = max(level_turn_g, avail * HARD_TURN_FRACTION)
-        # RAMP the hard pull in with bank, don't apply it the instant the
-        # turn is commanded. User-reported and confirmed live at step 0:
-        # roll=-2 (essentially wings level) with g=6.98 -- a huge pull with
-        # almost no bank is not a turn toward the target, it is a pure
-        # vertical loop, which is exactly "points to the sky and climbs."
-        # Scale the portion of hard_pull_g above level_turn_g by how far the
-        # jet has actually rolled toward desired_bank (0 at wings-level
-        # against a real desired bank, 1 once actually banked into it), so
-        # the airframe rolls into the turn before it pulls hard, same as
-        # real BFM ("roll and pull," not "pull then roll"). When there is
-        # barely any turn to make (desired_bank ~ 0, target near dead ahead)
-        # this has nothing to gate against and the pull applies normally.
-        if abs(desired_bank) < 1.0:
-            bank_fraction = 1.0
-        else:
-            bank_fraction = max(0.0, min(1.0, telem["roll_deg"] / desired_bank))
-        hard_pull_g = level_turn_g + (hard_pull_g_full - level_turn_g) * bank_fraction
-        # PITCH-HOLD on top of the turn, ported from f15_airshow.py's
-        # hold_nose() -- the only proven, currently-working hard-turn law in
-        # this codebase. Four different altitude/climb-rate/gamma corrections
-        # were tried here in turn and each failed or introduced a new failure
-        # mode (see PITCH_RECOVER_G_PER_DEG's definition for the full
-        # history). Driving pitch toward level as a direct additive g term,
-        # every step, regardless of altitude or climb rate, is what airshow
-        # actually flies hard turns with, confirmed live not to balloon.
+        alt_err = self.target_alt_ft - telem["alt_ft"]
+        hard_pull_g = max(level_turn_g, avail * HARD_TURN_FRACTION)
         g_cmd = (hard_pull_g * self.aggression
-                 + PITCH_RECOVER_G_PER_DEG * (0.0 - telem["pitch_deg"]))
-        g_cmd = max(0.3, min(min(avail, MAX_G), g_cmd))
+                 + alt_err * K_ALT_G
+                 - telem["climb_rate_fps"] * K_CLIMB_G)
+        g_cmd = min(min(avail, MAX_G), g_cmd)
+        g_cmd = max(0.3, g_cmd)
 
         shoot_missile = (aim9_in_envelope(rng, bearing_err, telem["tgt_speed_kt"],
                                           telem["has_lock"])
