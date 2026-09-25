@@ -37,6 +37,14 @@ STALL_SPEED_KT = 180.0          # 1g stall speed; n_max = (V/Vs)^2
 CAS_ROLL_RATE_FULL_DPS = 213.1  # aileron=1.0 commands this via the roll CAS
 MAX_G = 9.0
 ENGAGE_RANGE_NM = 5.0
+MAX_MISSILES = 4                # real AIM-9 rail count -- an empty rail can't fire
+FIRE_COOLDOWN_STEPS = 60        # 3s at 20Hz: time for one shot to fly clear
+                                 # before re-evaluating -- without this,
+                                 # aim9_in_envelope() is re-checked every
+                                 # 1/20s and stays true for many consecutive
+                                 # steps, so every step in the envelope
+                                 # released another round instead of one shot
+                                 # per pass.
 K_BANK_TO_RATE = 2.5            # bank error -> commanded roll rate
 MAX_BANK_DEG = 80.0
 HARD_TURN_FRACTION = 0.9        # fraction of available g to pull while
@@ -199,6 +207,7 @@ class CombatPilot:
         self._low_energy = False
         self._reset_steps = 0  # how long we have been in RESET, see step()
         self._turn_dir = 1.0  # committed turn direction, see step()
+        self._fire_cooldown = 0  # steps remaining before another shot may fire
 
     def g_available(self, airspeed_kt):
         """Real aerodynamic limit: stall speed scales as sqrt(n)."""
@@ -255,6 +264,8 @@ class CombatPilot:
         return max(-CAS_ROLL_RATE_FULL_DPS, min(CAS_ROLL_RATE_FULL_DPS, rate))
 
     def step(self, telem, threat):
+        if self._fire_cooldown > 0:
+            self._fire_cooldown -= 1
         aim = lead_bearing_deg(telem["lat"], telem["lon"], telem["airspeed_kt"],
                                telem["tgt_lat"], telem["tgt_lon"],
                                telem["tgt_heading_deg"], telem["tgt_speed_kt"])
@@ -410,11 +421,14 @@ class CombatPilot:
         g_cmd = min(min(avail, MAX_G), g_cmd)
         g_cmd = max(0.3, g_cmd)
 
-        shoot_missile = aim9_in_envelope(rng, bearing_err,
-                                         telem["tgt_speed_kt"], telem["has_lock"])
+        shoot_missile = (aim9_in_envelope(rng, bearing_err, telem["tgt_speed_kt"],
+                                          telem["has_lock"])
+                         and self._fire_cooldown <= 0
+                         and self.missiles_fired < MAX_MISSILES)
         shoot_gun = gun_in_envelope(rng, bearing_err)
         if shoot_missile:
             self.missiles_fired += 1
+            self._fire_cooldown = FIRE_COOLDOWN_STEPS
 
         return Command(
             g_cmd=g_cmd,
