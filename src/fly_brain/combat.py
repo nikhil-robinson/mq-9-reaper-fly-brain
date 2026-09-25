@@ -67,6 +67,8 @@ NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
 # terrain that sits at ~5400ft.
 K_ALT_G = 1.0 / 4000.0   # g of extra pull per ft of altitude error
 K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
+MAX_ALT_CORRECTION_G = 2.0  # cap so altitude/climb damping nudges the
+                             # engagement turn instead of overriding it
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -421,9 +423,21 @@ class CombatPilot:
         level_turn_g = 1.0 / max(0.2, math.cos(math.radians(telem["roll_deg"])))
         alt_err = self.target_alt_ft - telem["alt_ft"]
         hard_pull_g = max(level_turn_g, avail * HARD_TURN_FRACTION)
-        g_cmd = (hard_pull_g * self.aggression
-                 + alt_err * K_ALT_G
-                 - telem["climb_rate_fps"] * K_CLIMB_G)
+        # The altitude/climb-rate correction is only meant to nudge the
+        # engagement altitude and damp oscillation (see
+        # test_climb_rate_is_damped_so_altitude_does_not_oscillate) -- it is
+        # NOT meant to fight the vertical rate a hard pursuit turn naturally
+        # produces. Uncapped, a jet pulling ~4.8g with the nose up easily
+        # climbs at 150-200fps, and -climb_rate*K_CLIMB_G alone then
+        # subtracts 3-4g, gutting the turn down near the 0.3g floor -- logged
+        # live as g=0.87-1.5 through most of an engagement despite a large
+        # bearing error, the jet flying nearly straight while the AI kept
+        # maneuvering hard. Clamp the correction so it can steer the
+        # engagement altitude but never cancel out the intended pull.
+        alt_correction_g = alt_err * K_ALT_G - telem["climb_rate_fps"] * K_CLIMB_G
+        alt_correction_g = max(-MAX_ALT_CORRECTION_G,
+                               min(MAX_ALT_CORRECTION_G, alt_correction_g))
+        g_cmd = hard_pull_g * self.aggression + alt_correction_g
         g_cmd = min(min(avail, MAX_G), g_cmd)
         g_cmd = max(0.3, g_cmd)
 
