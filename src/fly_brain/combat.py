@@ -17,7 +17,13 @@ KT_TO_MS = 0.5144
 
 # AIM-9 envelope, from the F-15 add-on's own fox2.nas parameters.
 AIM9_MIN_NM = 0.2       # below this the warhead has no time to arm
-AIM9_MAX_NM = 9.0
+# fox2.nas's own seeker can technically see out to 9nm, but its guidance
+# repeatedly failed to converge on a maneuvering target from that far in
+# practice -- confirmed in FlightGear's own log, all "Passed target" misses,
+# miss distance tracking launch range almost exactly: 1.92nm->111m miss,
+# 1.67nm->30m, 1.33nm->2.5m, 1.00nm->3.3m. Tightened to the range band where
+# the miss distance was actually small enough to matter.
+AIM9_MAX_NM = 1.5
 AIM9_FOV_DEG = 27.5     # seeker field of view
 AIM9_MIN_TGT_KT = 15.0  # fox2.nas refuses a class-A target slower than this
 # Gun: M61A1. Short range, and it only hits with the pipper genuinely on.
