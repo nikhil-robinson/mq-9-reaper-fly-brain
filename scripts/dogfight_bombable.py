@@ -166,13 +166,18 @@ def main():
     # airspeed reading, real speed was already 700+kt, regardless of how
     # tightly that loop polled or how early it throttled back, because the
     # overshoot had already happened before the loop ever started.
-    # Throttle is explicitly held at a known, safe, low value through this
-    # setup window instead (not full power, and not left to whatever
-    # quickstart() happens to default to, which was never verified) -- it is
-    # only pushed to full power immediately before the dedicated accelerate
-    # loop, right when we actually want to start climbing toward combat speed.
-    t.set("/controls/engines/engine[0]/throttle", 0.4)
-    t.set("/controls/engines/engine[1]/throttle", 0.4)
+    # Use the AUTOPILOT's own speed-with-throttle mode through this setup
+    # window, not a manually fixed throttle value. Confirmed live: fixing
+    # throttle at 0.4 while altitude-hold was engaged was not enough thrust
+    # to actually hold altitude under 4x speed-up, and the jet descended into
+    # terrain (crashed at sim-t=133s, well before the dedicated accelerate
+    # loop ever started) -- altitude-hold does not compensate for a
+    # power setting outside its own control. speed-with-throttle is a closed
+    # loop that manages BOTH concerns correctly; it is only too conservative
+    # for the deliberate "get to combat speed fast" phase, which is why it is
+    # still overridden with direct max throttle right at that loop's start.
+    t.set("/autopilot/settings/target-speed-kt", 320.0)
+    t.set("/autopilot/locks/speed", "speed-with-throttle")
 
     # Speed up sim time NOW, not before startup(). The crash traced earlier
     # was from applying it during quickstart()/engine-crank, a genuinely
@@ -208,7 +213,10 @@ def main():
     print("  accelerating to %.0fkt before taking the stick" % CORNER_SPEED_KT,
           flush=True)
     # NOW push to full power -- not earlier. This is the actual accelerate
-    # phase, timed to start right as we begin polling for it.
+    # phase, timed to start right as we begin polling for it. The speed lock
+    # must be released FIRST, or the autopilot's own speed-with-throttle
+    # loop fights this direct command every tick.
+    t.set("/autopilot/locks/speed", "")
     t.set("/controls/engines/engine[0]/throttle", 1.0)
     t.set("/controls/engines/engine[1]/throttle", 1.0)
     # Poll frequently and throttle back the INSTANT the target is reached.
