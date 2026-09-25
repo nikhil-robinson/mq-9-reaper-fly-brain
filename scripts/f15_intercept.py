@@ -392,6 +392,15 @@ def connect_stick(t):
     only disengaged here, right before the native-protocol hot loop takes
     over -- and it means the jet is never actually unpiloted.
     """
+    # Speed too -- a caller that engaged "speed-with-throttle" during setup
+    # (dogfight_bombable.py does, to hold a target speed while arming) left
+    # it running through the ENTIRE fight otherwise: that autothrottle keeps
+    # writing its own throttle every frame to hold its target speed, fighting
+    # our native-ctrls throttle=1.0 combat command and throttling back well
+    # before real afterburner. Confirmed as the cause of a "throttle very
+    # low, no afterburner while chasing" complaint -- the stick was
+    # reconnected but the autothrottle never let go.
+    t.set("/autopilot/locks/speed", "")
     for _ in range(10):
         t.set("/autopilot/locks/altitude", "")
         t.set("/autopilot/locks/heading", "")
