@@ -118,16 +118,6 @@ def read_enemies(t):
 def main():
     t = Telnet()
     time.sleep(2)
-    # SPEED_UP is deliberately NOT set yet. startup()'s engine-start sequence
-    # and the "accelerate to corner speed" wait loop below both use WALL-CLOCK
-    # time.sleep() to pace themselves and poll the FDM, assuming sim time and
-    # wall time move together -- confirmed live, setting /sim/speed-up=4x this
-    # early crashed the jet into terrain at sim-t=28s while still deep in
-    # setup (aircraft hit ShrubCover before the script had even taken the
-    # stick), almost certainly the held autopilot and/or these wall-clock
-    # polling loops desyncing once 1 real second stopped meaning 1 sim
-    # second. Speed-up is applied ONLY once the real control loop is running,
-    # since that loop paces itself off telemetry every step, not a wall timer.
     startup(t)
 
     # HOLD THE JET WHILE WE SET UP. startup() ends by calling connect_stick(),
@@ -149,48 +139,9 @@ def main():
     # the whole setup and the climb: confirmed live it handed over at 273kt,
     # where only (273/180)^2 = 2.3g exists, so it could not turn onto a target
     # 172deg behind without departing. A slow F-15 cannot fight.
-    # NOT speed-with-throttle here: that is a conservative cruise-hold PID,
-    # not a "get to combat speed fast" command -- a real fighter mashes the
-    # throttle to max/afterburner to accelerate, it does not gently modulate
-    # toward a setpoint. Confirmed as the actual cause of a much-too-slow
-    # accelerate phase: real F-15 performance goes 300->430kt in ~15-25s at
-    # military power (faster still with afterburner), and speed-with-throttle
-    # was taking well over that. Command throttle directly instead and skip
-    # the autopilot speed lock entirely for this phase.
-    # Do NOT set throttle to 1.0 here. Confirmed live, TWICE: setting full
-    # throttle this early, before enable_bombable()/arm_aim9()/radar setup
-    # (which is itself several real seconds of telnet round trips) and THEN
-    # turning on 4x speed-up, meant the jet was already accelerating at full
-    # military power under 4x sim time through that entire setup window --
-    # by the time the dedicated accelerate loop below took its first
-    # airspeed reading, real speed was already 700+kt, regardless of how
-    # tightly that loop polled or how early it throttled back, because the
-    # overshoot had already happened before the loop ever started.
-    # Use the AUTOPILOT's own speed-with-throttle mode through this setup
-    # window, not a manually fixed throttle value. Confirmed live: fixing
-    # throttle at 0.4 while altitude-hold was engaged was not enough thrust
-    # to actually hold altitude under 4x speed-up, and the jet descended into
-    # terrain (crashed at sim-t=133s, well before the dedicated accelerate
-    # loop ever started) -- altitude-hold does not compensate for a
-    # power setting outside its own control. speed-with-throttle is a closed
-    # loop that manages BOTH concerns correctly; it is only too conservative
-    # for the deliberate "get to combat speed fast" phase, which is why it is
-    # still overridden with direct max throttle right at that loop's start.
-    t.set("/autopilot/settings/target-speed-kt", 320.0)
+    t.set("/autopilot/settings/target-speed-kt", CORNER_SPEED_KT)
     t.set("/autopilot/locks/speed", "speed-with-throttle")
-
-    # Speed up sim time NOW, not before startup(). The crash traced earlier
-    # was from applying it during quickstart()/engine-crank, a genuinely
-    # fragile transient. Here the engines are confirmed running and the FCS
-    # is already proven connected (startup()'s own connect_stick() call
-    # already succeeded once), and with throttle left low, this setup window
-    # is not accelerating the jet, only running (fast) telnet round trips --
-    # so there is nothing here for speed-up to desync.
-    if SPEED_UP > 1:
-        t.set("/sim/speed-up", SPEED_UP)
-        print("  sim speed-up=%sx (engines confirmed, FCS proven, throttle "
-              "still low -- nothing here for speed-up to desync)"
-              % SPEED_UP, flush=True)
+    time.sleep(1)
 
     enable_bombable(t)
     fp.arm_aim9(t)
@@ -212,41 +163,14 @@ def main():
     # fight starts.
     print("  accelerating to %.0fkt before taking the stick" % CORNER_SPEED_KT,
           flush=True)
-    # NOW push to full power -- not earlier. This is the actual accelerate
-    # phase, timed to start right as we begin polling for it. The speed lock
-    # must be released FIRST, or the autopilot's own speed-with-throttle
-    # loop fights this direct command every tick.
-    t.set("/autopilot/locks/speed", "")
-    t.set("/controls/engines/engine[0]/throttle", 1.0)
-    t.set("/controls/engines/engine[1]/throttle", 1.0)
-    # Poll frequently and throttle back the INSTANT the target is reached.
-    # Confirmed live: full throttle under 4x sim speed-up, checked only every
-    # 2 REAL seconds (8 sim-seconds), overshot the 390kt exit threshold all
-    # the way to 771kt before the loop noticed -- a real fighter at max
-    # afterburner genuinely accelerates that fast, so the polling has to be
-    # tight enough to catch it, not just the throttle command corrected.
-    # Throttle back to a MODEST cruise setting well before the target, with a
-    # wide margin: every t.get()/t.set() here is a real telnet round trip
-    # (tens to hundreds of ms), and under speed-up that latency alone lets a
-    # fighter at full afterburner gain a real chunk of speed between "we
-    # decided to back off" and "the throttle command actually lands" --
-    # confirmed live, backing off to 0.7 exactly AT the threshold still
-    # overshot to 709-771kt. Backing off to near-idle (0.3) a full 100kt
-    # early leaves enough margin to absorb that latency.
-    throttled_back = False
-    final_spd = 0.0
-    for _ in range(150):
+    for _ in range(25):
         spd = float(t.get("/velocities/airspeed-kt") or 0)
-        final_spd = spd
-        if not throttled_back and spd >= CORNER_SPEED_KT - 140:
-            t.set("/controls/engines/engine[0]/throttle", 0.3)
-            t.set("/controls/engines/engine[1]/throttle", 0.3)
-            throttled_back = True
         if spd >= CORNER_SPEED_KT - 40:
             break
-        time.sleep(0.2)
+        time.sleep(2)
     print("  at %.0fft / %.0fkt, taking the stick" % (
-        float(t.get("/position/altitude-ft") or 0), final_spd), flush=True)
+        float(t.get("/position/altitude-ft")),
+        float(t.get("/velocities/airspeed-kt") or 0)), flush=True)
 
     connect_stick(t)     # release the autopilot -- the loop starts NOW
 
