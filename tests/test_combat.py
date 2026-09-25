@@ -45,18 +45,18 @@ def test_corner_throttle_is_always_a_valid_throttle():
 
 
 def test_aim9_envelope_requires_lock_range_fov_and_a_moving_target():
-    assert aim9_in_envelope(2.0, 5.0, 300.0, True)
-    assert not aim9_in_envelope(2.0, 5.0, 300.0, False), "no lock"
+    assert aim9_in_envelope(1.0, 5.0, 300.0, True)
+    assert not aim9_in_envelope(1.0, 5.0, 300.0, False), "no lock"
     assert not aim9_in_envelope(0.1, 5.0, 300.0, True), "too close to arm"
     assert not aim9_in_envelope(12.0, 5.0, 300.0, True), "beyond max range"
-    assert not aim9_in_envelope(2.0, 40.0, 300.0, True), "outside seeker FOV"
-    assert not aim9_in_envelope(2.0, 5.0, 5.0, True), "target under 15kt"
+    assert not aim9_in_envelope(1.0, 40.0, 300.0, True), "outside seeker FOV"
+    assert not aim9_in_envelope(1.0, 5.0, 5.0, True), "target under 15kt"
 
 
 def test_aim9_envelope_is_symmetric_in_bearing_error():
-    assert aim9_in_envelope(2.0, AIM9_FOV_DEG - 1, 300.0, True)
-    assert aim9_in_envelope(2.0, -(AIM9_FOV_DEG - 1), 300.0, True)
-    assert not aim9_in_envelope(2.0, AIM9_FOV_DEG + 1, 300.0, True)
+    assert aim9_in_envelope(1.0, AIM9_FOV_DEG - 1, 300.0, True)
+    assert aim9_in_envelope(1.0, -(AIM9_FOV_DEG - 1), 300.0, True)
+    assert not aim9_in_envelope(1.0, AIM9_FOV_DEG + 1, 300.0, True)
 
 
 def test_gun_envelope_is_close_range_and_tightly_aimed():
@@ -87,7 +87,7 @@ def _telem(**over):
 
 def test_evade_takes_priority_over_everything():
     p = CombatPilot(callsign="BLUE1")
-    cmd = p.step(_telem(tgt_range_nm=2.0, has_lock=True),
+    cmd = p.step(_telem(tgt_range_nm=1.0, has_lock=True),
                  dict(missile_inbound=True, missile_bearing_deg=90.0))
     assert cmd.state == "EVADE"
     assert cmd.flares > 0, "must release flares while evading"
@@ -112,8 +112,8 @@ def test_intercept_beyond_five_miles():
 
 def test_fires_missile_only_with_lock_in_envelope():
     p = CombatPilot(callsign="BLUE1")
-    assert p.step(_telem(tgt_range_nm=2.0, has_lock=True), NO_THREAT).fire_missile
-    assert not p.step(_telem(tgt_range_nm=2.0, has_lock=False), NO_THREAT).fire_missile
+    assert p.step(_telem(tgt_range_nm=1.0, has_lock=True), NO_THREAT).fire_missile
+    assert not p.step(_telem(tgt_range_nm=1.0, has_lock=False), NO_THREAT).fire_missile
 
 
 def test_fires_gun_when_very_close_and_aligned():
