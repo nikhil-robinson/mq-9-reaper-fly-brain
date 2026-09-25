@@ -2,7 +2,6 @@ import math
 from fly_brain.combat import (
     AIM9_FOV_DEG,
     CORNER_SPEED_KT,
-    KT_TO_FPS,
     CombatPilot,
     RESET_MAX_STEPS as RESET_MAX_STEPS_TEST,
     aim9_in_envelope,
@@ -145,21 +144,26 @@ def test_commands_are_always_within_actuator_limits():
 
 
 
-def test_descending_jet_is_commanded_more_g_than_a_level_one():
+def test_nose_down_jet_is_commanded_more_g_than_a_level_one():
     """The bug Phase 1 exposed: commanding only 1/cos(bank) holds altitude in a
     coordinated level turn and nowhere else, so both jets walked 9500ft
-    downhill in 45s over terrain at ~5400ft."""
-    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
-    level = p.step(_telem(alt_ft=18000.0, climb_rate_fps=0.0), NO_THREAT)
-    sinking = p.step(_telem(alt_ft=14000.0, climb_rate_fps=-80.0), NO_THREAT)
-    assert sinking.g_cmd > level.g_cmd
+    downhill in 45s over terrain at ~5400ft. Superseded by pitch-hold (ported
+    from f15_airshow.py's hold_nose(), the only proven working hard-turn law
+    in this codebase, after four altitude/climb-rate/gamma-based attempts
+    each failed or introduced a new failure mode -- see
+    PITCH_RECOVER_G_PER_DEG's definition for the full history): the pitch
+    error itself, not altitude or climb rate, drives the correction."""
+    p = CombatPilot(callsign="BLUE1")
+    level = p.step(_telem(pitch_deg=0.0), NO_THREAT)
+    nose_down = p.step(_telem(pitch_deg=-20.0), NO_THREAT)
+    assert nose_down.g_cmd > level.g_cmd
 
 
-def test_climb_rate_is_damped_so_altitude_does_not_oscillate():
-    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
-    steady = p.step(_telem(alt_ft=17000.0, climb_rate_fps=0.0), NO_THREAT)
-    climbing = p.step(_telem(alt_ft=17000.0, climb_rate_fps=+100.0), NO_THREAT)
-    assert climbing.g_cmd < steady.g_cmd, "already climbing: ease off"
+def test_nose_up_jet_is_commanded_less_g_than_a_level_one():
+    p = CombatPilot(callsign="BLUE1")
+    level = p.step(_telem(pitch_deg=0.0), NO_THREAT)
+    nose_up = p.step(_telem(pitch_deg=+20.0), NO_THREAT)
+    assert nose_up.g_cmd < level.g_cmd, "already pitched up: ease off"
 
 
 def test_recovery_floor_scales_with_speed_and_dive_angle():
@@ -222,11 +226,11 @@ def test_ground_avoidance_outranks_an_incoming_missile():
     assert cmd.state == "RECOVER", "the ground kills faster than the missile"
 
 
-def test_altitude_terms_never_break_the_actuator_limits():
-    p = CombatPilot(callsign="BLUE1", target_alt_ft=18000.0)
+def test_pitch_hold_never_breaks_the_actuator_limits():
+    p = CombatPilot(callsign="BLUE1")
     for alt in (2000.0, 9000.0, 18000.0, 40000.0):
-        for cr in (-300.0, 0.0, +300.0):
-            cmd = p.step(_telem(alt_ft=alt, climb_rate_fps=cr), NO_THREAT)
+        for pitch in (-60.0, 0.0, +60.0):
+            cmd = p.step(_telem(alt_ft=alt, pitch_deg=pitch), NO_THREAT)
             assert 0.0 < cmd.g_cmd <= 9.0
             assert abs(cmd.roll_rate_dps) <= 213.1
 
@@ -396,21 +400,6 @@ def test_engage_does_not_pull_hard_g_while_still_wings_level():
     assert cmd.g_cmd < 2.0, "must roll into the bank before pulling hard"
 
 
-def test_g_floor_drops_to_zero_to_arrest_a_genuine_runaway_climb():
-    """Confirmed live: a jet thousands of feet above its target and still
-    gaining altitude kept climbing for several more seconds even pinned at
-    the normal 0.3g floor -- 0.3g along an already-steep nose-up flight path
-    is still a climb; unloading only stops ADDING to it. In that narrow
-    condition (genuinely far above target AND still climbing) the floor
-    must be allowed to reach true zero-g so the nose can actually arc over,
-    not the 0.3g used for ordinary maneuvering."""
-    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
-    cmd = p.step(_telem(alt_ft=45000.0, roll_deg=0.0, climb_rate_fps=200.0,
-                        airspeed_kt=325.0), NO_THREAT)
-    assert cmd.g_cmd < 0.3, "must be allowed below the ordinary floor"
-    assert cmd.g_cmd >= 0.0
-
-
 def test_engage_uses_full_throttle_not_a_cruise_setpoint():
     """A fighter closing for a kill does not manage toward a cruise speed
     mid-turn -- that throttle policy belongs to RESET (energy management),
@@ -439,25 +428,22 @@ def test_reset_is_truly_unloaded_not_altitude_corrected():
     assert high.g_cmd == 1.0
 
 
-def test_reset_neutral_is_cos_gamma_not_a_flat_one_g():
+def test_reset_pushes_nose_down_when_pitched_up_instead_of_a_flat_one_g():
     """A bare 1g only holds the CURRENT flight path -- it is only "level"
-    when that flight path is already level. User-reported and confirmed
-    live: after a hard pull, RESET's flat 1g left the jet "pointing at the
-    sky and climbing" for 25+ real seconds, 476->248kt. An earlier version
-    of this fix shed g proportional to PITCH as a proxy for "nose up," but a
-    real FCS readback then showed the actual flight-path angle (gamma, from
-    climb rate -- NOT pitch, which only equals gamma at zero AoA) still
-    48-65deg after that "fix" had been running for seconds. RESET's neutral
-    must be n=cos(gamma), derived from real climb rate, not pitch."""
+    when the jet is already near level. User-reported and confirmed live:
+    after a hard pull, RESET's flat 1g left the jet "pointing at the sky and
+    climbing" for 25+ real seconds, 476->248kt. Two corrections were tried
+    and both failed (see PITCH_RECOVER_G_PER_DEG's definition for the full
+    history, including a mathematically "correct" n=cos(gamma) neutral that
+    only HELD an already-vertical climb instead of fixing it). RESET now
+    uses the same proven pitch-hold as ENGAGE/INTERCEPT, ported from
+    f15_airshow.py's hold_nose(): actively drive pitch toward level."""
     p = CombatPilot(callsign="BLUE1")
-    level = p.step(_telem(airspeed_kt=180.0, climb_rate_fps=0.0), NO_THREAT)
-    climbing_60deg = p.step(_telem(airspeed_kt=180.0,
-                                   climb_rate_fps=180.0 * KT_TO_FPS
-                                   * math.sin(math.radians(60.0))),
-                            NO_THREAT)
-    assert level.state == "RESET" and climbing_60deg.state == "RESET"
+    level = p.step(_telem(airspeed_kt=180.0, pitch_deg=0.0), NO_THREAT)
+    nose_up = p.step(_telem(airspeed_kt=180.0, pitch_deg=60.0), NO_THREAT)
+    assert level.state == "RESET" and nose_up.state == "RESET"
     assert level.g_cmd == 1.0
-    assert abs(climbing_60deg.g_cmd - math.cos(math.radians(60.0))) < 0.01
+    assert nose_up.g_cmd < level.g_cmd, "must push over, not hold the climb"
 
 
 def test_reset_is_hard_capped_in_duration():
