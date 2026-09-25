@@ -395,6 +395,21 @@ def test_engage_does_not_pull_hard_g_while_still_wings_level():
     assert cmd.g_cmd < 2.0, "must roll into the bank before pulling hard"
 
 
+def test_g_floor_drops_to_zero_to_arrest_a_genuine_runaway_climb():
+    """Confirmed live: a jet thousands of feet above its target and still
+    gaining altitude kept climbing for several more seconds even pinned at
+    the normal 0.3g floor -- 0.3g along an already-steep nose-up flight path
+    is still a climb; unloading only stops ADDING to it. In that narrow
+    condition (genuinely far above target AND still climbing) the floor
+    must be allowed to reach true zero-g so the nose can actually arc over,
+    not the 0.3g used for ordinary maneuvering."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    cmd = p.step(_telem(alt_ft=45000.0, roll_deg=0.0, climb_rate_fps=200.0,
+                        airspeed_kt=325.0), NO_THREAT)
+    assert cmd.g_cmd < 0.3, "must be allowed below the ordinary floor"
+    assert cmd.g_cmd >= 0.0
+
+
 def test_engage_uses_full_throttle_not_a_cruise_setpoint():
     """A fighter closing for a kill does not manage toward a cruise speed
     mid-turn -- that throttle policy belongs to RESET (energy management),

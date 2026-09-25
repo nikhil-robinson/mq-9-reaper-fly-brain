@@ -503,7 +503,22 @@ class CombatPilot:
         alt_correction_g = alt_term_g + climb_term_g
         g_cmd = hard_pull_g * self.aggression + alt_correction_g
         g_cmd = min(min(avail, MAX_G), g_cmd)
-        g_cmd = max(0.3, g_cmd)
+        # The 0.3g floor exists for ordinary maneuvering, where anything
+        # lower is uncomfortably close to zero-g for no real reason. It is
+        # NOT meant to block a genuine emergency push-over: confirmed live,
+        # a jet already thousands of feet above its target and STILL
+        # climbing kept climbing for many more seconds even pinned at the
+        # 0.3g floor (0.3g along an already-steep nose-up flight path is
+        # still a climb -- unloading only stops ADDING to the climb, it
+        # does not itself descend). Only in that specific, narrow condition
+        # -- genuinely far above the target AND still gaining altitude --
+        # let the floor drop to true zero-g so the nose can actually arc
+        # over instead of coasting up for several more seconds at a floor
+        # that was never meant to be a hard limit here.
+        if alt_err < -ALT_ERR_CLAMP_FT and telem["climb_rate_fps"] > 0.0:
+            g_cmd = max(0.0, g_cmd)
+        else:
+            g_cmd = max(0.3, g_cmd)
 
         shoot_missile = (aim9_in_envelope(rng, bearing_err, telem["tgt_speed_kt"],
                                           telem["has_lock"])
