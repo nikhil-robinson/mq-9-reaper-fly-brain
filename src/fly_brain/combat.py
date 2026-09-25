@@ -67,18 +67,15 @@ NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
 # terrain that sits at ~5400ft.
 K_ALT_G = 1.0 / 4000.0   # g of extra pull per ft of altitude error
 K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
-# 2.0 was chosen only to stop the correction from CANCELLING a normal turn
-# (see the g_cmd comment below) -- it was never meant to also be the ceiling
-# against a genuinely runaway climb, and confirmed live it is not: with
-# hard_pull_g reaching 6-8g in a hard turn, a capped -2g correction cannot
-# outvote it, and the jet zoomed from ~14,000ft to 48,000ft over one
-# engagement, unable to arrest the climb at any point. Raised so the
-# correction can actually win once genuinely far out of position, while
-# staying inert for ordinary drift: at a realistic +/-2000ft engagement
-# error the raw term is only ~0.5g either way, so raising the ceiling alone
-# changes nothing for normal maneuvering -- it only matters once alt_err or
-# climb_rate is large enough to need real intervention.
-MAX_ALT_CORRECTION_G = 6.0
+# The error itself is clamped before scaling (see g_cmd below), not the
+# output -- a single output cap cannot simultaneously be strong enough to
+# stop a real runaway and weak enough not to override a real turn once the
+# jet is legitimately far out of position. 3000ft -> 0.75g max from the alt
+# term; 100fps -> 2.0g max from the climb term. Both bounds sized well
+# above ordinary engagement drift (a few hundred ft, a few tens of fps) so
+# neither ever fires during normal maneuvering.
+ALT_ERR_CLAMP_FT = 3000.0
+CLIMB_RATE_CLAMP_FPS = 100.0
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -289,7 +286,7 @@ class CombatPilot:
         # touched again, so a chase against an enemy thousands of feet away
         # from wherever we happened to spawn had the altitude correction
         # fighting for a number with nothing to do with the fight -- one
-        # cause (not the only one, see MAX_ALT_CORRECTION_G) of a live run
+        # cause (not the only one, see ALT_ERR_CLAMP_FT below) of a live run
         # zoom-climbing to 48,000ft chasing a target actually near 16,000ft.
         if "tgt_alt_ft" in telem:
             self.target_alt_ft = telem["tgt_alt_ft"]
@@ -453,9 +450,26 @@ class CombatPilot:
         # bearing error, the jet flying nearly straight while the AI kept
         # maneuvering hard. Clamp the correction so it can steer the
         # engagement altitude but never cancel out the intended pull.
-        alt_correction_g = alt_err * K_ALT_G - telem["climb_rate_fps"] * K_CLIMB_G
-        alt_correction_g = max(-MAX_ALT_CORRECTION_G,
-                               min(MAX_ALT_CORRECTION_G, alt_correction_g))
+        # BOUND THE INPUT, not just the output. A single overall output cap
+        # (tried first) cannot work at both ends: sized to not cancel a
+        # normal turn, it was provably too weak to stop a genuine runaway
+        # (jet zoom-climbed 14,000->48,000ft chasing a target near
+        # 16,000ft); raised to actually stop that, it then overpowered the
+        # turn from the OTHER side the moment alt_err/climb_rate were large
+        # for a real reason -- confirmed live: with the jet still 30,000ft
+        # above a since-descended target, the raised cap alone contributed
+        # -6g, crushing hard_pull_g (~7g) down to ~1g and producing the
+        # "just flying in circles, range climbing 5nm->13nm" symptom. A
+        # linear g-per-ft/g-per-fps law is fundamentally unbounded in its
+        # input, so clamp alt_err and climb_rate BEFORE scaling -- then the
+        # correction can never exceed a small, known g budget regardless of
+        # how large the actual mismatch is, and no single output cap has to
+        # try to do both jobs at once.
+        alt_term_g = max(-ALT_ERR_CLAMP_FT, min(ALT_ERR_CLAMP_FT, alt_err)) * K_ALT_G
+        climb_term_g = -max(-CLIMB_RATE_CLAMP_FPS,
+                            min(CLIMB_RATE_CLAMP_FPS,
+                                telem["climb_rate_fps"])) * K_CLIMB_G
+        alt_correction_g = alt_term_g + climb_term_g
         g_cmd = hard_pull_g * self.aggression + alt_correction_g
         g_cmd = min(min(avail, MAX_G), g_cmd)
         g_cmd = max(0.3, g_cmd)
