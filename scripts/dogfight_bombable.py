@@ -149,9 +149,35 @@ def main():
     # the whole setup and the climb: confirmed live it handed over at 273kt,
     # where only (273/180)^2 = 2.3g exists, so it could not turn onto a target
     # 172deg behind without departing. A slow F-15 cannot fight.
-    t.set("/autopilot/settings/target-speed-kt", CORNER_SPEED_KT)
-    t.set("/autopilot/locks/speed", "speed-with-throttle")
+    # NOT speed-with-throttle here: that is a conservative cruise-hold PID,
+    # not a "get to combat speed fast" command -- a real fighter mashes the
+    # throttle to max/afterburner to accelerate, it does not gently modulate
+    # toward a setpoint. Confirmed as the actual cause of a much-too-slow
+    # accelerate phase: real F-15 performance goes 300->430kt in ~15-25s at
+    # military power (faster still with afterburner), and speed-with-throttle
+    # was taking well over that. Command throttle directly instead and skip
+    # the autopilot speed lock entirely for this phase.
+    t.set("/controls/engines/engine[0]/throttle", 1.0)
+    t.set("/controls/engines/engine[1]/throttle", 1.0)
     time.sleep(1)
+
+    # Speed up sim time NOW, not before startup(). The crash traced earlier
+    # was from applying it during quickstart()/engine-crank, a genuinely
+    # fragile transient. Here the engines are confirmed running, the FCS is
+    # already proven connected (startup()'s own connect_stick() call already
+    # succeeded once), and every axis is now under FlightGear's own internal
+    # autopilot PID (altitude-hold, true-heading-hold, speed-with-throttle) --
+    # those are driven by sim-time ticks inside FlightGear itself, not by our
+    # wall-clock time.sleep() polling, so they should track correctly under
+    # speed-up. This is what actually shortens the dominant remaining setup
+    # cost: accelerating from the ~300kt spawn speed to combat speed is real
+    # vehicle dynamics, not a fixed timer, and was taking the bulk of the
+    # 20-60+ real seconds between SIM READY and the first control-loop step.
+    if SPEED_UP > 1:
+        t.set("/sim/speed-up", SPEED_UP)
+        print("  sim speed-up=%sx (engines confirmed, FCS proven, now under "
+              "FlightGear's own autopilot PIDs -- should track correctly)"
+              % SPEED_UP, flush=True)
 
     enable_bombable(t)
     fp.arm_aim9(t)
@@ -183,15 +209,6 @@ def main():
         float(t.get("/velocities/airspeed-kt") or 0)), flush=True)
 
     connect_stick(t)     # release the autopilot -- the loop starts NOW
-
-    # NOW it is safe to speed up sim time: everything from here on paces
-    # itself off telemetry read every step, not off a wall-clock sleep that
-    # assumed real time. This still shortens Bombable's 55+rand()s
-    # attack_init delay for real, since that timer runs on sim time.
-    if SPEED_UP > 1:
-        t.set("/sim/speed-up", SPEED_UP)
-        print("  sim speed-up=%sx (applied post-setup, once the control loop "
-              "is what is actually flying the jet)" % SPEED_UP, flush=True)
 
     nb = NativeBridge()
     telem = nb.get_telemetry()
