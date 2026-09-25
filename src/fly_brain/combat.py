@@ -452,7 +452,24 @@ class CombatPilot:
         # turning level" bug the floor term originally fixed.
         level_turn_g = 1.0 / max(0.2, math.cos(math.radians(telem["roll_deg"])))
         alt_err = self.target_alt_ft - telem["alt_ft"]
-        hard_pull_g = max(level_turn_g, avail * HARD_TURN_FRACTION)
+        hard_pull_g_full = max(level_turn_g, avail * HARD_TURN_FRACTION)
+        # RAMP the hard pull in with bank, don't apply it the instant the
+        # turn is commanded. User-reported and confirmed live at step 0:
+        # roll=-2 (essentially wings level) with g=6.98 -- a huge pull with
+        # almost no bank is not a turn toward the target, it is a pure
+        # vertical loop, which is exactly "points to the sky and climbs."
+        # Scale the portion of hard_pull_g above level_turn_g by how far the
+        # jet has actually rolled toward desired_bank (0 at wings-level
+        # against a real desired bank, 1 once actually banked into it), so
+        # the airframe rolls into the turn before it pulls hard, same as
+        # real BFM ("roll and pull," not "pull then roll"). When there is
+        # barely any turn to make (desired_bank ~ 0, target near dead ahead)
+        # this has nothing to gate against and the pull applies normally.
+        if abs(desired_bank) < 1.0:
+            bank_fraction = 1.0
+        else:
+            bank_fraction = max(0.0, min(1.0, telem["roll_deg"] / desired_bank))
+        hard_pull_g = level_turn_g + (hard_pull_g_full - level_turn_g) * bank_fraction
         # The altitude/climb-rate correction is only meant to nudge the
         # engagement altitude and damp oscillation (see
         # test_climb_rate_is_damped_so_altitude_does_not_oscillate) -- it is

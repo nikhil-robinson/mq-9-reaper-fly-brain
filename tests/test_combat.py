@@ -379,6 +379,22 @@ def test_engage_pulls_hard_g_not_just_enough_to_hold_altitude():
     assert cmd.g_cmd > 0.7 * min(avail, 9.0), "must use most of the envelope"
 
 
+def test_engage_does_not_pull_hard_g_while_still_wings_level():
+    """User-reported and confirmed live: step 0 of a real engagement logged
+    roll=-2 (essentially wings level) with g=6.98 -- a huge pull with almost
+    no bank is not a turn toward the target, it is a pure vertical loop
+    ("points to the sky and climbs"). A large bearing error commands a large
+    desired bank, but the hard pull must ramp in with actual bank progress,
+    not apply the instant the turn starts."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    # Target far off to one side (large bearing error -> large desired
+    # bank), jet still essentially wings-level.
+    cmd = p.step(_telem(alt_ft=15000.0, roll_deg=-2.0, heading_deg=0.0,
+                        tgt_lat=37.0, tgt_lon=-114.9, tgt_heading_deg=90.0,
+                        airspeed_kt=475.0, tgt_range_nm=2.0), NO_THREAT)
+    assert cmd.g_cmd < 2.0, "must roll into the bank before pulling hard"
+
+
 def test_engage_uses_full_throttle_not_a_cruise_setpoint():
     """A fighter closing for a kill does not manage toward a cruise speed
     mid-turn -- that throttle policy belongs to RESET (energy management),
