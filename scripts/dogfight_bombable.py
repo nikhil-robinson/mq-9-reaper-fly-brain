@@ -118,16 +118,16 @@ def read_enemies(t):
 def main():
     t = Telnet()
     time.sleep(2)
-    # Speed up SIM TIME as early as possible, over telnet, before the native
-    # bridge (and its own per-packet speedup field) even exists. This is not
-    # a cosmetic saving: Bombable's attack_init has a hardcoded 55+rand()
-    # SECOND settimer delay before an AI aircraft starts attacking, and that
-    # timer runs on sim time -- so /sim/speed-up genuinely shortens the real
-    # wall-clock wait for the fight to start, not just the flight-loop rate.
-    if SPEED_UP > 1:
-        t.set("/sim/speed-up", SPEED_UP)
-        print("  sim speed-up=%sx (Bombable's 55s AI warm-up scales with it)"
-              % SPEED_UP, flush=True)
+    # SPEED_UP is deliberately NOT set yet. startup()'s engine-start sequence
+    # and the "accelerate to corner speed" wait loop below both use WALL-CLOCK
+    # time.sleep() to pace themselves and poll the FDM, assuming sim time and
+    # wall time move together -- confirmed live, setting /sim/speed-up=4x this
+    # early crashed the jet into terrain at sim-t=28s while still deep in
+    # setup (aircraft hit ShrubCover before the script had even taken the
+    # stick), almost certainly the held autopilot and/or these wall-clock
+    # polling loops desyncing once 1 real second stopped meaning 1 sim
+    # second. Speed-up is applied ONLY once the real control loop is running,
+    # since that loop paces itself off telemetry every step, not a wall timer.
     startup(t)
 
     # HOLD THE JET WHILE WE SET UP. startup() ends by calling connect_stick(),
@@ -183,6 +183,15 @@ def main():
         float(t.get("/velocities/airspeed-kt") or 0)), flush=True)
 
     connect_stick(t)     # release the autopilot -- the loop starts NOW
+
+    # NOW it is safe to speed up sim time: everything from here on paces
+    # itself off telemetry read every step, not off a wall-clock sleep that
+    # assumed real time. This still shortens Bombable's 55+rand()s
+    # attack_init delay for real, since that timer runs on sim time.
+    if SPEED_UP > 1:
+        t.set("/sim/speed-up", SPEED_UP)
+        print("  sim speed-up=%sx (applied post-setup, once the control loop "
+              "is what is actually flying the jet)" % SPEED_UP, flush=True)
 
     nb = NativeBridge()
     telem = nb.get_telemetry()
