@@ -33,6 +33,10 @@ MAX_G = 9.0
 ENGAGE_RANGE_NM = 5.0
 K_BANK_TO_RATE = 2.5            # bank error -> commanded roll rate
 MAX_BANK_DEG = 80.0
+HARD_TURN_FRACTION = 0.9        # fraction of available g to pull while
+                                 # actively turning to engage -- a fighter
+                                 # pulls hard, not the bare minimum to hold
+                                 # altitude
 NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
                                  # turn direction rather than re-deriving sign
 
@@ -337,13 +341,22 @@ class CombatPilot:
             self._turn_dir = 1.0 if bearing_err >= 0 else -1.0
         desired_bank = self._turn_dir * min(MAX_BANK_DEG,
                                             abs(bearing_err) * 2.0 * self.aggression)
-        # A level turn at bank phi needs n = 1/cos(phi) just to hold altitude,
-        # plus a correction for altitude error and damping on climb rate --
-        # without those two terms the jet descends steadily even while turning
-        # "level", which walked both jets 9500ft downhill in 45s.
+        # PULL HARD, not just enough to stay level. This is a fighter turning
+        # to engage, not an airliner holding altitude -- level_turn_g alone
+        # (1/cos(bank)) is only the MINIMUM g to avoid descending, and
+        # commanding just that produced slow, cautious turns (logged g=1.0-2.0
+        # through most engagements against an available envelope up to 9g).
+        # Pull most of the available envelope instead, so the turn radius is
+        # actually tight: n = 1/cos(phi) still has to be respected as a FLOOR
+        # (you cannot pull less than that without descending), but the target
+        # is HARD_TURN_FRACTION of whatever the airframe can sustain, on top
+        # of that floor -- plus the same altitude-error and climb-rate
+        # correction terms so this does not reopen the "walks downhill while
+        # turning level" bug the floor term originally fixed.
         level_turn_g = 1.0 / max(0.2, math.cos(math.radians(telem["roll_deg"])))
         alt_err = self.target_alt_ft - telem["alt_ft"]
-        g_cmd = (level_turn_g * self.aggression
+        hard_pull_g = max(level_turn_g, avail * HARD_TURN_FRACTION)
+        g_cmd = (hard_pull_g * self.aggression
                  + alt_err * K_ALT_G
                  - telem["climb_rate_fps"] * K_CLIMB_G)
         g_cmd = min(min(avail, MAX_G), g_cmd)
@@ -359,7 +372,11 @@ class CombatPilot:
             g_cmd=g_cmd,
             roll_rate_dps=self._roll_to(desired_bank, telem["roll_deg"],
                                         telem["airspeed_kt"]),
-            throttle=corner_throttle(telem["airspeed_kt"]),
+            # Full throttle while actively engaging -- a fighter turning to
+            # kill does not manage toward a cruise setpoint mid-fight.
+            # corner_throttle's proportional law is for energy management
+            # (RESET), not for a jet that is currently pulling hard to close.
+            throttle=1.0,
             fire_missile=shoot_missile,
             fire_gun=shoot_gun,
             flares=0,

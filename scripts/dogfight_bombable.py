@@ -118,6 +118,16 @@ def read_enemies(t):
 def main():
     t = Telnet()
     time.sleep(2)
+    # Speed up SIM TIME as early as possible, over telnet, before the native
+    # bridge (and its own per-packet speedup field) even exists. This is not
+    # a cosmetic saving: Bombable's attack_init has a hardcoded 55+rand()
+    # SECOND settimer delay before an AI aircraft starts attacking, and that
+    # timer runs on sim time -- so /sim/speed-up genuinely shortens the real
+    # wall-clock wait for the fight to start, not just the flight-loop rate.
+    if SPEED_UP > 1:
+        t.set("/sim/speed-up", SPEED_UP)
+        print("  sim speed-up=%sx (Bombable's 55s AI warm-up scales with it)"
+              % SPEED_UP, flush=True)
     startup(t)
 
     # HOLD THE JET WHILE WE SET UP. startup() ends by calling connect_stick(),

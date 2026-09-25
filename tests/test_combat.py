@@ -1,3 +1,4 @@
+import math
 from fly_brain.combat import (
     AIM9_FOV_DEG,
     CORNER_SPEED_KT,
@@ -359,3 +360,30 @@ def test_turn_direction_commits_near_180deg_bearing_ambiguity():
             signs_seen.add(cmd.roll_rate_dps > 0)
     assert len(signs_seen) <= 1, (
         "turn direction must not flip sign near the +-180deg ambiguity")
+
+
+def test_engage_pulls_hard_g_not_just_enough_to_hold_altitude():
+    """This is a fighter turning to engage, not an airliner holding altitude.
+    Confirmed live: commanding only level_turn_g (1/cos(bank), the bare
+    minimum to avoid descending) produced slow, cautious turns logging
+    g=1.0-2.0 against an available envelope up to 9g -- much wider turn radius
+    and much slower to point at the target than the airframe allows."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    cmd = p.step(_telem(alt_ft=15000.0, roll_deg=45.0, airspeed_kt=450.0,
+                        tgt_range_nm=3.0), NO_THREAT)
+    avail = p.g_available(450.0)
+    level_turn_g = 1.0 / math.cos(math.radians(45.0))
+    assert cmd.g_cmd > level_turn_g + 1.0, (
+        "must pull well beyond the bare altitude-hold minimum")
+    assert cmd.g_cmd > 0.7 * min(avail, 9.0), "must use most of the envelope"
+
+
+def test_engage_uses_full_throttle_not_a_cruise_setpoint():
+    """A fighter closing for a kill does not manage toward a cruise speed
+    mid-turn -- that throttle policy belongs to RESET (energy management),
+    not to an active engagement."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    fast = p.step(_telem(airspeed_kt=600.0, tgt_range_nm=3.0), NO_THREAT)
+    slow = p.step(_telem(airspeed_kt=350.0, tgt_range_nm=3.0), NO_THREAT)
+    assert fast.throttle == 1.0
+    assert slow.throttle == 1.0
