@@ -36,6 +36,31 @@ SPEED_UP = int(os.environ.get("SPEED_UP", "1"))
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "3000"))
 M_TO_NM = 1.0 / 1852.0
 MENU = "/bombable/menusettings/"
+# FCS_DIAG=1: read back the real JSBSim FCS/CAS chain alongside our own
+# g_cmd, on its own telnet connection at 5Hz, entirely separate from the
+# control loop. This does NOT change any control-law code -- it exists to
+# answer, with real telemetry instead of another guess, whether g_cmd is
+# even reaching the airframe as a matching real load factor. See the
+# decision tree: g_cmd vs stick-commanded-g (is our G_TABLE wrong?),
+# stick-commanded-g vs Nz (is the CAS achieving the demand?), ptc-saturated
+# / pitch-input-sum pinned (is nose-down authority clipped?).
+FCS_DIAG = os.environ.get("FCS_DIAG", "0") == "1"
+FCS_DIAG_PROPS = [
+    "/fdm/jsbsim/fcs/elevator-cmd-norm",
+    "/fdm/jsbsim/fcs/pitch-trim-cmd-norm",
+    "/fdm/jsbsim/fcs/stick-pitch",
+    "/fdm/jsbsim/fcs/stick-pitch-scheduled",
+    "/fdm/jsbsim/fcs/stick-commanded-g",
+    "/fdm/jsbsim/accelerations/Nz",
+    "/fdm/jsbsim/cas/ptc-deviation-g",
+    "/fdm/jsbsim/cas/ptc-saturated",
+    "/fdm/jsbsim/cas/ptc-feedback-g",
+    "/fdm/jsbsim/fcs/pitch-input-sum",
+    "/fdm/jsbsim/fcs/pitch-input-deg",
+    "/fdm/jsbsim/fcs/elevator-pos-deg",
+    "/fdm/jsbsim/aero/alpha-deg",
+    "/fdm/jsbsim/flight-path/gamma-deg",
+]
 # TELNET MUST NOT TOUCH THE HOT LOOP. native_protocol.py's docstring says it
 # outright ("an earlier session's telnet-driven hot loop rolled inverted and
 # hit terrain within ~15 steps") and this script proved it again: reading three
@@ -185,7 +210,26 @@ def main():
     # same reason -- these are telnet round trips and must never touch the
     # 20Hz hot loop.
     state = {"enemies": enemies, "stop": False, "locked": False,
-            "locked_on": None, "own_damage": 0.0}
+            "locked_on": None, "own_damage": 0.0, "g_cmd": 0.0}
+
+    if FCS_DIAG:
+        diag_t = Telnet()
+
+        def poll_fcs_diag():
+            while not state["stop"]:
+                try:
+                    vals = [diag_t.get(p) for p in FCS_DIAG_PROPS]
+                    print("FCS_DIAG g_cmd=%.3f %s" % (
+                        state["g_cmd"],
+                        " ".join("%s=%s" % (p.rsplit("/", 1)[-1], v)
+                                 for p, v in zip(FCS_DIAG_PROPS, vals))),
+                          flush=True)
+                except Exception as exc:
+                    print("  fcs diag poll error: %s" % exc, flush=True)
+                time.sleep(0.2)
+
+        diag_thread = threading.Thread(target=poll_fcs_diag, daemon=True)
+        diag_thread.start()
 
     def poll_enemies():
         last_designated = None
@@ -327,6 +371,7 @@ def main():
             has_lock=has_lock,
         ), threat)
 
+        state["g_cmd"] = cmd.g_cmd
         if cmd.fire_missile:
             fire_requested["missile"] = True
         fire_requested["gun_on"] = cmd.fire_gun
