@@ -407,6 +407,22 @@ def test_reset_is_truly_unloaded_not_altitude_corrected():
     assert high.g_cmd == 1.0
 
 
+def test_reset_pushes_over_when_nose_up_instead_of_coasting_up():
+    """A bare 1g only means level flight if the jet is already near level.
+    User-reported and confirmed live: after a hard pull, RESET's flat 1g
+    left the jet "pointing at the sky and climbing" for 25+ real seconds,
+    476->248kt, because 1g along a steeply nose-up flight path is still a
+    climb. RESET must shed g below 1.0 in proportion to nose-up pitch so it
+    actively arcs over instead of coasting up on whatever attitude it
+    entered RESET with."""
+    p = CombatPilot(callsign="BLUE1")
+    level = p.step(_telem(airspeed_kt=180.0, pitch_deg=0.0), NO_THREAT)
+    nose_up = p.step(_telem(airspeed_kt=180.0, pitch_deg=40.0), NO_THREAT)
+    assert level.state == "RESET" and nose_up.state == "RESET"
+    assert level.g_cmd == 1.0
+    assert nose_up.g_cmd < 1.0, "must push over, not coast up"
+
+
 def test_reset_is_hard_capped_in_duration():
     """Without a cap, a wide hysteresis band let RESET run for 30-90+ real
     seconds straight in live testing -- either slow-circling (before the

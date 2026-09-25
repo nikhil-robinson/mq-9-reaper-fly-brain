@@ -76,6 +76,7 @@ K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
 # neither ever fires during normal maneuvering.
 ALT_ERR_CLAMP_FT = 3000.0
 CLIMB_RATE_CLAMP_FPS = 100.0
+K_PITCH_UNLOAD = 0.02   # g shed per degree of nose-up pitch during RESET
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -393,8 +394,21 @@ class CombatPilot:
             # a monotonic speed bleed from 280kt to 144kt over 78 REAL
             # seconds of RESET that never once recovered, because the
             # "extend" was still quietly loaded the whole time.
+            #
+            # But a bare 1.0 assumes the jet is already near level. It is
+            # not, whenever RESET is entered mid-zoom: user-reported and
+            # confirmed live -- after a hard pull the jet kept "pointing at
+            # the sky and climbing" for 25+ seconds at RESET's flat 1g,
+            # 476->248kt, because 1g along a steeply nose-up flight path is
+            # still a climb, not level flight -- it does not arc over on its
+            # own until momentum runs out far higher than necessary. Reduce
+            # below 1g in proportion to nose-up pitch so RESET actively
+            # pushes over (a real "unload over the top") instead of coasting
+            # up on whatever attitude it happened to enter with.
+            g_cmd = 1.0 - max(0.0, telem.get("pitch_deg", 0.0)) * K_PITCH_UNLOAD
+            g_cmd = max(0.3, min(1.0, g_cmd))
             return Command(
-                g_cmd=1.0,
+                g_cmd=g_cmd,
                 roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],
                                             telem["airspeed_kt"]),
                 throttle=1.0,
