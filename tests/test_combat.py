@@ -387,3 +387,20 @@ def test_engage_uses_full_throttle_not_a_cruise_setpoint():
     slow = p.step(_telem(airspeed_kt=350.0, tgt_range_nm=3.0), NO_THREAT)
     assert fast.throttle == 1.0
     assert slow.throttle == 1.0
+
+
+def test_reset_is_truly_unloaded_not_altitude_corrected():
+    """RESET's g_cmd must be a bare 1.0, not 1.0 plus the altitude-hold
+    correction term used everywhere else. Confirmed live: adding that term
+    kept demanding small climb/descent corrections the entire time, which is
+    directly counter to an extend -- any g above the true minimum induces
+    drag. The result was a monotonic speed bleed from 280kt to 144kt over 78
+    real seconds that never recovered, because the "extend" was still
+    quietly loaded the whole time."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    # far below and far above the (irrelevant, for RESET) target altitude
+    low = p.step(_telem(alt_ft=8000.0, airspeed_kt=280.0), NO_THREAT)
+    high = p.step(_telem(alt_ft=20000.0, airspeed_kt=280.0), NO_THREAT)
+    assert low.state == "RESET" and high.state == "RESET"
+    assert low.g_cmd == 1.0
+    assert high.g_cmd == 1.0

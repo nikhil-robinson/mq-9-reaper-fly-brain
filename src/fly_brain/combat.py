@@ -310,8 +310,17 @@ class CombatPilot:
             # closing or re-engaging. Unloading (low g) and rolling wings
             # level converts the energy budget straight into airspeed instead
             # of spending it holding a turn that goes nowhere useful.
+            # g_cmd is a bare 1.0 (true unloaded flight), NOT 1.0 plus the
+            # altitude-hold correction term used everywhere else. Confirmed
+            # live: adding alt_err_g here kept demanding climb/descent
+            # correction g the entire time, which is directly counter to an
+            # extend -- any g above the true minimum induces drag and costs
+            # exactly the energy this state exists to rebuild. The result was
+            # a monotonic speed bleed from 280kt to 144kt over 78 REAL
+            # seconds of RESET that never once recovered, because the
+            # "extend" was still quietly loaded the whole time.
             return Command(
-                g_cmd=max(0.3, min(avail, 1.0 + alt_err_g(self, telem))),
+                g_cmd=1.0,
                 roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],
                                             telem["airspeed_kt"]),
                 throttle=1.0,
