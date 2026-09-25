@@ -181,8 +181,20 @@ ROLL_MAX_DEG = 45.0
 #      DELTA from 1g. A 0.6 "cap" was demanding ~4g continuously.
 # So command g directly and invert this table, instead of PID-tuning a
 # surface deflection the aircraft doesn't actually accept.
-G_TABLE_G = [-3.99, -1.62, 1.00, 3.58, 8.05]
-G_TABLE_ELEV = [1.00, 0.70, 0.00, -0.54, -1.00]
+# CORRECTED: this table used to be a direct inversion of ONE lookup table
+# read off elevator->g behavior empirically, but the real FCS composes TWO
+# tables in series (flight-controls.xml fig 17: stick -> stick-pitch-scheduled,
+# then fig 18: stick-pitch-scheduled -> stick-commanded-g). Inverting only the
+# second table and applying it to elevator directly over-commanded by
+# ~1.3x in both directions -- confirmed live via FCS_DIAG readback of the
+# real fdm/jsbsim/fcs/stick-commanded-g against our old g_cmd (e.g. we
+# commanded 0.30g while the real airframe was asked for -0.26g). This is
+# the composed f2(f1(elevator)) table instead, computed from both tableData
+# blocks. Spot-checked against the old table's known-wrong outputs: old
+# claimed elev -0.54 -> 3.58g, this table's inverse gives elev -0.54 for
+# g=5.40, matching the real composed math.
+G_TABLE_G = [-4.00, -2.00, -0.67, 1.00, 2.06, 4.00, 8.00]
+G_TABLE_ELEV = [1.000, 0.476, 0.351, 0.003, -0.188, -0.293, -1.000]
 K_ALT_G = 1.0 / 4000.0  # g of extra pull per ft of altitude error
 K_CLIMB_G = 0.02  # g per ft/s of climb rate (damping)
 G_CMD_MIN, G_CMD_MAX = 0.3, 5.0
