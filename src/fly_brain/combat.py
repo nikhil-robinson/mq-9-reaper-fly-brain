@@ -33,6 +33,8 @@ MAX_G = 9.0
 ENGAGE_RANGE_NM = 5.0
 K_BANK_TO_RATE = 2.5            # bank error -> commanded roll rate
 MAX_BANK_DEG = 80.0
+NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
+                                 # turn direction rather than re-deriving sign
 
 # Altitude terms, carried over from the intercept law where they were proven.
 # A dogfight still has to not fly into the ground: confirmed live that
@@ -52,6 +54,16 @@ M_PER_FT = 0.3048
 # Fraction of available lift spent on the turn itself, leaving the rest for
 # holding altitude. Without this the pilot commands a bank it cannot sustain.
 TURN_LIFT_BUDGET = 0.8
+# Energy floor. Below this the jet stops turning and gets its speed back.
+# Confirmed live: holding a 63-74deg bank at 14500ft decayed 418kt -> 296kt
+# even at full throttle, and available g fell 4.18 -> 1.90 with it, until the
+# bank being held needed more lift than existed. A turning fight is an energy
+# fight, and a controller that only ever points at the enemy loses it.
+ENERGY_FLOOR_KT = 300.0
+ENERGY_RECOVER_KT = 360.0   # hysteresis: recover to here before fighting again
+
+
+MAX_LEAD_TIME_SEC = 20.0
 
 
 def lead_bearing_deg(own_lat, own_lon, own_speed_kt,
@@ -63,10 +75,24 @@ def lead_bearing_deg(own_lat, own_lon, own_speed_kt,
     degenerates into a lag chase that never closes. Estimate time-to-go from
     present range and own speed, advance the target along its own velocity
     vector, and aim there. One iteration is enough at dogfight ranges.
+
+    t_go = range/speed BLOWS UP at long range with near-parallel headings
+    (near-zero closure): confirmed live at 14nm with the target on a similar
+    heading, t_go came out near 140s, extrapolating the target ~26km along its
+    track -- an offset_point() displacement of the same order as the range
+    itself, which walks the "lead point" onto roughly the opposite side of the
+    local great circle from the real target. The result was a bearing ~275deg
+    off the true one, which CombatPilot then chased with full authority,
+    producing a violent, divergent roll oscillation (observed: bank swinging
+    +179 -> -178 -> +167 deg over 4 seconds) that nearly flew into terrain.
+    Real lead pursuit is only meaningful over the few seconds it actually
+    takes a shot to arrive, not over a straight-line "closure" projection at
+    long stand-off range -- so t_go is capped at a sane maximum, well inside
+    which the small-angle extrapolation this formula assumes remains valid.
     """
     rng_m = haversine_m(own_lat, own_lon, tgt_lat, tgt_lon)
     own_ms = max(1.0, own_speed_kt * KT_TO_MS)
-    t_go = rng_m / own_ms
+    t_go = min(MAX_LEAD_TIME_SEC, rng_m / own_ms)
     lead_lat, lead_lon = offset_point(tgt_lat, tgt_lon, tgt_heading_deg,
                                       tgt_speed_kt * KT_TO_MS * t_go)
     return bearing_deg(own_lat, own_lon, lead_lat, lead_lon)
@@ -115,6 +141,12 @@ Command = namedtuple("Command", "g_cmd roll_rate_dps throttle "
                                 "fire_missile fire_gun flares state")
 
 
+def alt_err_g(pilot, telem):
+    """Altitude-hold contribution to the g demand, shared by every state."""
+    return ((pilot.target_alt_ft - telem["alt_ft"]) * K_ALT_G
+            - telem["climb_rate_fps"] * K_CLIMB_G)
+
+
 class CombatPilot:
     """One dogfight policy, flown by BOTH jets.
 
@@ -133,6 +165,8 @@ class CombatPilot:
         self.state = "SEARCH"
         self.flares_used = 0
         self.missiles_fired = 0
+        self._low_energy = False
+        self._turn_dir = 1.0  # committed turn direction, see step()
 
     def g_available(self, airspeed_kt):
         """Real aerodynamic limit: stall speed scales as sqrt(n)."""
@@ -207,13 +241,24 @@ class CombatPilot:
         if telem.get("agl_ft", 1e9) < floor_ft:
             self.state = "RECOVER"
             if abs(telem["roll_deg"]) > 30.0:
-                # Roll upright at the FULL rate, unloaded. Pulling while banked
-                # hard just turns; every tenth of a second here is altitude, so
-                # do not trickle it through a proportional gain.
+                # Roll upright, fast but NOT a bare full-rate sign flip.
+                #
+                # A bang-bang "-copysign(MAX_RATE, roll)" reversing hard the
+                # instant roll crosses zero is only stable if the airframe
+                # tracks the commanded rate with zero lag. It does not:
+                # confirmed live, this exact bang-bang law produced a
+                # persistent limit-cycle oscillation through the recovery
+                # (roll logged at +161 -> +100 -> +35 -> +98 -> -132 -> +102
+                # -> -168 -> +167 deg over ~5 seconds, never actually settling
+                # near 0) while altitude kept bleeding underneath it, ending
+                # in a belly-flop into terrain at spd~12kt. Using _roll_to's
+                # own proportional approach to bank=0 keeps the full rate cap
+                # while damping as the error shrinks, so it can actually
+                # converge instead of perpetually overshooting past level.
                 return Command(
                     g_cmd=1.0,
-                    roll_rate_dps=-math.copysign(ROLL_RATE_LIMIT_DPS,
-                                                 telem["roll_deg"]),
+                    roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],
+                                                telem["airspeed_kt"]),
                     throttle=1.0, fire_missile=False, fire_gun=False,
                     flares=0, state=self.state)
             return Command(
@@ -244,11 +289,54 @@ class CombatPilot:
                 state=self.state,
             )
 
+        # ENERGY before geometry. Hysteresis so it does not chatter in and out
+        # of the fight at the threshold.
+        if telem["airspeed_kt"] < ENERGY_FLOOR_KT:
+            self._low_energy = True
+        elif telem["airspeed_kt"] > ENERGY_RECOVER_KT:
+            self._low_energy = False
+        if self._low_energy:
+            self.state = "RESET"
+            # EXTEND STRAIGHT, wings level, to rebuild energy as fast as
+            # possible. A shallow constant bank toward the target's bearing
+            # is NOT an extend -- it is a slow circle: confirmed live, holding
+            # a fixed -25deg bank toward a target sitting 60-95deg off the
+            # nose kept the jet in a wide, closed loop for 30+ seconds while
+            # range climbed from 11nm to 17nm and away, never once actually
+            # closing or re-engaging. Unloading (low g) and rolling wings
+            # level converts the energy budget straight into airspeed instead
+            # of spending it holding a turn that goes nowhere useful.
+            return Command(
+                g_cmd=max(0.3, min(avail, 1.0 + alt_err_g(self, telem))),
+                roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],
+                                            telem["airspeed_kt"]),
+                throttle=1.0,
+                fire_missile=False, fire_gun=False, flares=0, state=self.state)
+
         self.state = "ENGAGE" if rng <= ENGAGE_RANGE_NM else "INTERCEPT"
 
         # Turn hard enough to point at the lead solution, no harder.
-        desired_bank = max(-MAX_BANK_DEG,
-                           min(MAX_BANK_DEG, bearing_err * 2.0 * self.aggression))
+        #
+        # COMMIT TO A TURN DIRECTION near +-180deg bearing error. A target
+        # directly behind is equally reachable turning either way, and
+        # angle_diff_deg's sign there is essentially sub-degree measurement
+        # noise -- confirmed live, bearing_err flickered between +178 and
+        # -179 on a target sitting almost dead astern, which flipped
+        # desired_bank between +80 and -80deg every 20Hz step and produced a
+        # real, sustained bank oscillation (+164 -> +145 -> +157 -> -19deg)
+        # that bled 3200ft of altitude.
+        #
+        # The deadband is around the +-180 BOUNDARY itself, not around zero:
+        # +178 and -179 are only 3deg apart in reality but land on opposite
+        # sides of the wrap, while +178 and +90 (also both "large") are
+        # unambiguous and must be free to re-derive direction normally. So
+        # only freeze the committed direction when bearing_err sits within
+        # NEAR_180_DEADBAND_DEG of +-180; everywhere else the sign is
+        # trustworthy and is taken fresh every step.
+        if abs(abs(bearing_err) - 180.0) > NEAR_180_DEADBAND_DEG:
+            self._turn_dir = 1.0 if bearing_err >= 0 else -1.0
+        desired_bank = self._turn_dir * min(MAX_BANK_DEG,
+                                            abs(bearing_err) * 2.0 * self.aggression)
         # A level turn at bank phi needs n = 1/cos(phi) just to hold altitude,
         # plus a correction for altitude error and damping on climb rate --
         # without those two terms the jet descends steadily even while turning

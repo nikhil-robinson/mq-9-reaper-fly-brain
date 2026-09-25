@@ -182,13 +182,22 @@ def test_recovery_floor_includes_the_time_spent_rolling_upright():
 
 def test_near_the_ground_and_banked_it_rolls_upright_before_pulling():
     """This is the spiral-into-terrain fix: pulling while banked hard just
-    turns, and inverted it points the nose further down."""
+    turns, and inverted it points the nose further down.
+
+    The roll-to-level command is a DAMPED proportional law toward bank=0, not
+    a bang-bang -copysign(MAX_RATE, roll) that reverses at full rate the
+    instant roll crosses zero -- that bang-bang law produced a real limit
+    cycle in flight (roll oscillating +161/-132/+167deg, never settling) that
+    ended in a crash. So a strong but not-yet-saturated error (70deg) is
+    expected to command a large, correctly-signed rate without necessarily
+    hitting the exact 213.1 cap -- saturation is checked separately at a
+    larger error in test_recover_roll_upright_does_not_bang_bang_across_zero.
+    """
     p = CombatPilot(callsign="BLUE1")
     cmd = p.step(_telem(agl_ft=800.0, roll_deg=70.0, pitch_deg=-20.0,
                         airspeed_kt=400.0), NO_THREAT)
     assert cmd.state == "RECOVER"
-    assert abs(cmd.roll_rate_dps) == 213.1, "full rate, not a trickle"
-    assert cmd.roll_rate_dps < 0, "rolling back toward level from +70deg"
+    assert cmd.roll_rate_dps < -100.0, "fast, not a trickle"
     assert cmd.g_cmd == 1.0, "unloaded while rolling"
     assert cmd.throttle == 1.0
 
@@ -247,3 +256,106 @@ def test_a_slow_jet_chasing_a_target_behind_it_does_not_command_a_doomed_bank():
     # the commanded roll rate must be driving toward a sustainable bank, so at
     # zero current roll it cannot exceed K_BANK_TO_RATE * that limit
     assert abs(cmd.roll_rate_dps) <= 2.5 * sustainable + 1e-6
+
+
+def test_a_slow_jet_stops_turning_and_rebuilds_energy():
+    """A turning fight is an energy fight. Confirmed live: holding 63-74deg of
+    bank decayed 418kt to 296kt at full throttle, and available g fell with it
+    until the bank needed more lift than existed.
+
+    RESET extends wings-level (bank target 0), not a shallow constant bank
+    toward the target's bearing -- a fixed bank is a slow circle, not an
+    extend. Confirmed live: a -25deg "extend" toward a target 60-95deg off
+    the nose held the jet in a wide closed loop for 30+ seconds, with range
+    climbing from 11nm to 17nm and never closing."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    cmd = p.step(_telem(alt_ft=15000.0, agl_ft=9000.0, airspeed_kt=280.0,
+                        roll_deg=40.0,
+                        tgt_lat=37.05, tgt_lon=-114.90), NO_THREAT)
+    assert cmd.state == "RESET"
+    assert cmd.throttle == 1.0
+    assert cmd.roll_rate_dps < 0, "rolling back toward level from +40deg"
+    assert not cmd.fire_missile
+
+
+def test_energy_state_has_hysteresis_so_it_does_not_chatter():
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    p.step(_telem(airspeed_kt=280.0), NO_THREAT)          # enters RESET
+    mid = p.step(_telem(airspeed_kt=340.0), NO_THREAT)     # between the bands
+    assert mid.state == "RESET", "must not re-enter the fight at 340kt"
+    back = p.step(_telem(airspeed_kt=380.0), NO_THREAT)    # above recover band
+    assert back.state in ("ENGAGE", "INTERCEPT")
+
+
+def test_lead_bearing_does_not_blow_up_at_long_range_low_closure():
+    """Confirmed live: at 14nm with a near-parallel target heading, the
+    unclamped t_go extrapolated the target ~26km along its track -- an
+    offset roughly as large as the range itself -- producing a lead bearing
+    ~275deg off the true one. CombatPilot then chased that phantom bearing
+    with full roll authority and nearly flew into terrain (bank swinging
+    +179 -> -178 -> +167deg over 4 seconds)."""
+    own_lat, own_lon, own_spd = 37.20, -115.90, 360.0
+    tgt_lat, tgt_lon = 37.30, -115.75
+    pure = bearing_deg(own_lat, own_lon, tgt_lat, tgt_lon)
+    for tgt_hdg in (238, 239, 240, 245, 250):
+        lead = lead_bearing_deg(own_lat, own_lon, own_spd, tgt_lat, tgt_lon,
+                                tgt_hdg, 360.0)
+        assert abs(angle_diff_deg(lead, pure)) < 30.0, (
+            "lead bearing must stay near the true bearing at long range, "
+            "not swing across the whole compass")
+
+
+def test_lead_bearing_capped_extrapolation_still_leads_a_close_crossing_target():
+    """The cap must not defeat lead pursuit at ranges where it actually
+    matters -- a close, fast crossing target still needs a real lead angle."""
+    pure = bearing_deg(37.0, -115.0, 37.01, -115.0)
+    lead = lead_bearing_deg(37.0, -115.0, 400.0, 37.01, -115.0, 90.0, 400.0)
+    assert angle_diff_deg(lead, pure) > 3.0
+
+
+def test_recover_roll_upright_does_not_bang_bang_across_zero():
+    """The bang-bang law -copysign(MAX_RATE, roll) reverses at full rate the
+    INSTANT roll crosses zero. Confirmed live this produced a persistent limit
+    cycle through a real recovery (roll +161 -> +100 -> +35 -> +98 -> -132 ->
+    +102 -> -168 -> +167deg over ~5s, never settling) that ended in a
+    belly-flop crash. The fix must actually DAMP as roll approaches zero."""
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=13000.0)
+    # deep in the ground-recovery envelope, banked hard
+    far = p.step(_telem(agl_ft=500.0, roll_deg=100.0, pitch_deg=-10.0,
+                        airspeed_kt=300.0), NO_THREAT)
+    near = p.step(_telem(agl_ft=500.0, roll_deg=10.0, pitch_deg=-10.0,
+                         airspeed_kt=300.0), NO_THREAT)
+    assert far.state == "RECOVER" and near.state == "RECOVER"
+    # closer to level must command a SMALLER rate, not the same max rate --
+    # that is what lets it actually converge instead of oscillating forever.
+    assert abs(near.roll_rate_dps) < abs(far.roll_rate_dps)
+    assert abs(far.roll_rate_dps) == 213.1, "still full rate far from level"
+
+
+def test_turn_direction_commits_near_180deg_bearing_ambiguity():
+    """A target directly astern is equally reachable turning either way, and
+    angle_diff_deg's sign there is essentially sub-degree measurement noise.
+    Confirmed live: bearing_err flickered +178/-179 on a target sitting almost
+    dead astern, flipping the bank target +80/-80deg every 20Hz step and
+    producing a real, sustained oscillation that bled 3200ft of altitude.
+
+    The deadband is around the +-180 BOUNDARY, not around zero: a clearly
+    signed error (e.g. target 45deg off the nose) must still re-derive
+    direction normally, so the first call here establishes a real direction
+    from an unambiguous geometry before the ambiguous headings are fed in.
+    """
+    p = CombatPilot(callsign="BLUE1", target_alt_ft=15000.0)
+    # Establish a clear rightward turn from an unambiguous 45deg-right target.
+    p.step(_telem(heading_deg=0.0, tgt_lat=37.0001, tgt_lon=-114.9999,
+                  tgt_heading_deg=180.0), NO_THREAT)
+    assert p._turn_dir == 1.0
+    # Now feed a near-180 bearing error that flickers sign call to call, as
+    # sub-degree telemetry noise would. The COMMITTED direction must not flip.
+    signs_seen = set()
+    for hdg in (178.0, -179.0, 179.5, -178.5, 179.9, -179.9):
+        cmd = p.step(_telem(heading_deg=hdg, tgt_lat=37.0001, tgt_lon=-115.0,
+                            tgt_heading_deg=180.0), NO_THREAT)
+        if abs(cmd.roll_rate_dps) > 1.0:
+            signs_seen.add(cmd.roll_rate_dps > 0)
+    assert len(signs_seen) <= 1, (
+        "turn direction must not flip sign near the +-180deg ambiguity")

@@ -56,6 +56,8 @@ def decode_fdm(packet):
     longitude, latitude, altitude = fields[2], fields[3], fields[4]
     agl, phi, theta, psi = fields[5], fields[6], fields[7], fields[8]
     alpha = fields[9]  # angle of attack, radians
+    phidot = fields[11]  # roll rate, rad/s -- see decode_fdm's docstring note
+                         # on why the combat controller needed this
     thetadot = fields[12]  # pitch rate, rad/s
     vcas = fields[14]  # calibrated airspeed, knots
     # FlightGear's OWN climb rate, ft/s (net_fdm.hxx: ...psidot, vcas,
@@ -86,6 +88,7 @@ def decode_fdm(packet):
         "pitch_deg": theta * rad2deg,
         "heading_deg": psi * rad2deg,
         "alpha_deg": alpha * rad2deg,
+        "roll_rate_dps": phidot * rad2deg,
         "pitch_rate_dps": thetadot * rad2deg,
         "airspeed_kt": vcas,
         "climb_rate_fps": climb_rate_fps,

@@ -326,6 +326,33 @@ def arm_aim9(t):
     print(f"  Master arm={t.get(MASTER_ARM)} selector={t.get(WEAPON_SELECTOR)}")
 
 
+GUN_TRIGGER = "/controls/armament/trigger"
+SELECTOR_GUN = 0  # weapon-selector == 0 selects the gun, per weapons.nas
+
+
+def fire_gun(t, on):
+    """Hold or release the gun trigger.
+
+    weapons.nas listens on /controls/armament/trigger (a bare Nasal relative
+    path resolves against props.globals, i.e. this IS the root property, not
+    something under sim/model/f15) and only fires when weapon-selector==0.
+    Master arm must also be on (ArmSwitch, set by arm_aim9's caller or
+    separately) or update_gun_ready() reports not-ready and nothing fires.
+    """
+    t.set(WEAPON_SELECTOR, SELECTOR_GUN)
+    t.set(GUN_TRIGGER, "true" if on else "false")
+
+
+FLARE_CMD = "/ai/submodels/submodel[5]/flare-release-cmd"
+
+
+def release_flare(t):
+    """Pulse the flare dispenser once. Not relevant to a guns-only opponent
+    (Bombable's F-15 AI carries no missile, only two AN/M3 guns), but kept for
+    when a real AIM-9-armed adversary is added."""
+    t.set(FLARE_CMD, 1)
+
+
 def missile_status(t):
     """Read the selected missile's seeker status out of Nasal into a property.
 
