@@ -199,11 +199,19 @@ def main():
     # fight starts.
     print("  accelerating to %.0fkt before taking the stick" % CORNER_SPEED_KT,
           flush=True)
-    for _ in range(25):
+    # Poll frequently and throttle back the INSTANT the target is reached.
+    # Confirmed live: full throttle under 4x sim speed-up, checked only every
+    # 2 REAL seconds (8 sim-seconds), overshot the 390kt exit threshold all
+    # the way to 771kt before the loop noticed -- a real fighter at max
+    # afterburner genuinely accelerates that fast, so the polling has to be
+    # tight enough to catch it, not just the throttle command corrected.
+    for _ in range(150):
         spd = float(t.get("/velocities/airspeed-kt") or 0)
         if spd >= CORNER_SPEED_KT - 40:
+            t.set("/controls/engines/engine[0]/throttle", 0.7)
+            t.set("/controls/engines/engine[1]/throttle", 0.7)
             break
-        time.sleep(2)
+        time.sleep(0.2)
     print("  at %.0fft / %.0fkt, taking the stick" % (
         float(t.get("/position/altitude-ft")),
         float(t.get("/velocities/airspeed-kt") or 0)), flush=True)
