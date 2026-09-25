@@ -65,6 +65,7 @@ NEAR_180_DEADBAND_DEG = 20.0     # within this of +-180, keep the committed
 # commanding only 1/cos(bank) -- correct for a coordinated level turn and
 # nothing else -- walked both jets from 17900ft down to 8400ft in 45s, on
 # terrain that sits at ~5400ft.
+KT_TO_FPS = 1.68781
 K_ALT_G = 1.0 / 4000.0   # g of extra pull per ft of altitude error
 K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
 # The error itself is clamped before scaling (see g_cmd below), not the
@@ -76,7 +77,6 @@ K_CLIMB_G = 0.02         # g per ft/s of climb rate (damping)
 # neither ever fires during normal maneuvering.
 ALT_ERR_CLAMP_FT = 3000.0
 CLIMB_RATE_CLAMP_FPS = 100.0
-K_PITCH_UNLOAD = 0.02   # g shed per degree of nose-up pitch during RESET
 # Ground-avoidance floor, in AGL. A FIXED deck is not enough -- the airshow
 # work established this the hard way: the jet passed 4000ft AGL at 673kt in a
 # 42deg dive and hit the ground anyway, because a 5g pull-out at that speed
@@ -162,6 +162,22 @@ def corner_throttle(airspeed_kt, corner_kt=CORNER_SPEED_KT):
     """
     err = corner_kt - airspeed_kt
     return max(0.0, min(1.0, 0.55 + err / 300.0))
+
+
+def flight_path_gamma_deg(airspeed_kt, climb_rate_fps):
+    """Flight-path angle (climb angle), NOT pitch angle -- the two only
+    coincide at zero AoA. n=1 (1g, "unloaded") only holds a level flight
+    path when gamma is already ~0: dgamma/dt = g*(n*cos(bank) - cos(gamma))/V,
+    so at gamma=60deg, n=1 gives dgamma/dt = g*(1-0.5)/V > 0 -- a STEEPENING
+    climb, not level flight. The true neutral that holds the current flight
+    path (before adding any turn or correction on top) is n = cos(gamma).
+    Confirmed live: after several seconds of what the old code treated as
+    "unloaded, should be leveling off," a real FCS readback (FCS_DIAG) still
+    showed gamma-deg at 48-65deg -- 1.0 was never neutral at that angle.
+    """
+    airspeed_fps = max(1.0, airspeed_kt * KT_TO_FPS)
+    sin_gamma = max(-1.0, min(1.0, climb_rate_fps / airspeed_fps))
+    return math.degrees(math.asin(sin_gamma))
 
 
 def aim9_in_envelope(range_nm, bearing_err_deg, target_speed_kt, has_lock):
@@ -399,14 +415,19 @@ class CombatPilot:
             # not, whenever RESET is entered mid-zoom: user-reported and
             # confirmed live -- after a hard pull the jet kept "pointing at
             # the sky and climbing" for 25+ seconds at RESET's flat 1g,
-            # 476->248kt, because 1g along a steeply nose-up flight path is
-            # still a climb, not level flight -- it does not arc over on its
-            # own until momentum runs out far higher than necessary. Reduce
-            # below 1g in proportion to nose-up pitch so RESET actively
-            # pushes over (a real "unload over the top") instead of coasting
-            # up on whatever attitude it happened to enter with.
-            g_cmd = 1.0 - max(0.0, telem.get("pitch_deg", 0.0)) * K_PITCH_UNLOAD
-            g_cmd = max(0.3, min(1.0, g_cmd))
+            # 476->248kt, because 1g only holds the CURRENT flight path, and
+            # the current flight path was a steep climb, not level flight.
+            # An earlier version of this fix shed g proportional to PITCH
+            # angle as a proxy -- a real FCS readback (FCS_DIAG) then showed
+            # gamma-deg (flight-path angle, not pitch) still 48-65deg after
+            # several seconds of that "fix," because pitch and flight-path
+            # angle only coincide at zero AoA. The true neutral that holds
+            # (not descends, not climbs further) the CURRENT flight path is
+            # n = cos(gamma) -- see flight_path_gamma_deg.
+            gamma_deg = flight_path_gamma_deg(telem["airspeed_kt"],
+                                              telem["climb_rate_fps"])
+            g_cmd = math.cos(math.radians(gamma_deg))
+            g_cmd = max(0.0, min(1.0, g_cmd))
             return Command(
                 g_cmd=g_cmd,
                 roll_rate_dps=self._roll_to(0.0, telem["roll_deg"],

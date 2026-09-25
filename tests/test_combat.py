@@ -2,6 +2,7 @@ import math
 from fly_brain.combat import (
     AIM9_FOV_DEG,
     CORNER_SPEED_KT,
+    KT_TO_FPS,
     CombatPilot,
     RESET_MAX_STEPS as RESET_MAX_STEPS_TEST,
     aim9_in_envelope,
@@ -438,20 +439,25 @@ def test_reset_is_truly_unloaded_not_altitude_corrected():
     assert high.g_cmd == 1.0
 
 
-def test_reset_pushes_over_when_nose_up_instead_of_coasting_up():
-    """A bare 1g only means level flight if the jet is already near level.
-    User-reported and confirmed live: after a hard pull, RESET's flat 1g
-    left the jet "pointing at the sky and climbing" for 25+ real seconds,
-    476->248kt, because 1g along a steeply nose-up flight path is still a
-    climb. RESET must shed g below 1.0 in proportion to nose-up pitch so it
-    actively arcs over instead of coasting up on whatever attitude it
-    entered RESET with."""
+def test_reset_neutral_is_cos_gamma_not_a_flat_one_g():
+    """A bare 1g only holds the CURRENT flight path -- it is only "level"
+    when that flight path is already level. User-reported and confirmed
+    live: after a hard pull, RESET's flat 1g left the jet "pointing at the
+    sky and climbing" for 25+ real seconds, 476->248kt. An earlier version
+    of this fix shed g proportional to PITCH as a proxy for "nose up," but a
+    real FCS readback then showed the actual flight-path angle (gamma, from
+    climb rate -- NOT pitch, which only equals gamma at zero AoA) still
+    48-65deg after that "fix" had been running for seconds. RESET's neutral
+    must be n=cos(gamma), derived from real climb rate, not pitch."""
     p = CombatPilot(callsign="BLUE1")
-    level = p.step(_telem(airspeed_kt=180.0, pitch_deg=0.0), NO_THREAT)
-    nose_up = p.step(_telem(airspeed_kt=180.0, pitch_deg=40.0), NO_THREAT)
-    assert level.state == "RESET" and nose_up.state == "RESET"
+    level = p.step(_telem(airspeed_kt=180.0, climb_rate_fps=0.0), NO_THREAT)
+    climbing_60deg = p.step(_telem(airspeed_kt=180.0,
+                                   climb_rate_fps=180.0 * KT_TO_FPS
+                                   * math.sin(math.radians(60.0))),
+                            NO_THREAT)
+    assert level.state == "RESET" and climbing_60deg.state == "RESET"
     assert level.g_cmd == 1.0
-    assert nose_up.g_cmd < 1.0, "must push over, not coast up"
+    assert abs(climbing_60deg.g_cmd - math.cos(math.radians(60.0))) < 0.01
 
 
 def test_reset_is_hard_capped_in_duration():
