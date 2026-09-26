@@ -68,6 +68,8 @@ def query_elevation_m(t, lat, lon):
 
 
 MISSILE_LOCK = 1  # fox2.nas status constant
+MISSILE_FLYING = 2  # fox2.nas: the round has actually left the rail
+MISSILE_SEARCH = 0  # fox2.nas: seeker hunting for a lock
 MASTER_ARM = "/sim/model/f15/controls/armament/master-arm-switch"
 WEAPON_SELECTOR = "/sim/model/f15/controls/armament/weapon-selector"
 SELECTOR_SRM = 1  # 1 = short range missile (AIM-9), per weapons.nas
@@ -188,13 +190,96 @@ def designate(t, callsign):
     t.set(RADAR_RANGE, 40)
     _nasal(t, f'awg_9.active_u_callsign="{callsign}";')
     time.sleep(2.0)
-    t.set("/sim/probe/du", "-")
+    t.set("/sim/probe/du", "-")   # own scratch property; see missile_status
     _nasal(t, 'setprop("/sim/probe/du",awg_9.active_u==nil?"nil"'
               ':(""~awg_9.active_u.get_range()~"nm"));')
     time.sleep(0.4)
     designated = t.get("/sim/probe/du")
     print(f"  radar on, designating {callsign}: active_u={designated}")
     return designated
+
+
+def designated_callsign(t):
+    """Who the seeker can actually SEE right now (armament.contact), or None.
+
+    A designation is not permanent. awg_9.nas rebuilds tgts_list and nils
+    active_u whenever a contact stops matching or stops being displayed, and a
+    radar standby/range change drops it too. Confirmed live: mid-fight, with
+    the seeker searching and four rounds on the rails, both
+    awg_9.active_u_callsign and armament.contact read nil while the jet was
+    pointing 8deg off the bandit -- a perfect shot with nothing designated to
+    shoot at. So this has to be READ BACK and repaired, not set once and
+    assumed.
+    """
+    # READ armament.contact, NOT active_u_callsign.
+    #
+    # active_u_callsign is the string WE write, so it reads back the wanted
+    # callsign forever whether or not the radar ever acquired anything --
+    # comparing it to what we asked for is comparing a value to itself.
+    # Confirmed live: exactly one designate call in a whole run, reporting
+    # active_u=nil (the radar never built the target object), and the repair
+    # never retried because the string check always looked healthy. 29 locks,
+    # zero fire attempts.
+    #
+    # armament.contact is what fox2's seeker actually reads, so it is the
+    # only meaningful health check.
+    t.set("/sim/probe/dcs", "-")   # own scratch property; see missile_status
+    _nasal(t, 'setprop("/sim/probe/dcs",armament.contact==nil?"nil"'
+              ':(""~armament.contact.get_Callsign()));')
+    time.sleep(0.25)
+    v = t.get("/sim/probe/dcs")
+    return None if v in (None, "", "nil") else v
+
+
+def fire_srm(t):
+    """Release the selected AIM-9, ATOMICALLY, and report what really happened.
+
+    Returns the seeker status after the attempt: MISSILE_FLYING (2) means the
+    round actually left the rail; anything else means it did not.
+
+    fox2.nas only honours release() while the seeker is at MISSILE_LOCK (its
+    own docs say so at fox2.nas:56). Our lock flag comes from a poller and is
+    up to a second stale, so a release issued from Python routinely arrived
+    after the seeker had dropped back to MISSILE_SEARCH -- and fox2 silently
+    did nothing. Confirmed live: after two "FIRED missile" log lines,
+    sel_missile_count still read 4, armament.AIM.active held a single object
+    at status 0, and /ai/models/count never ticked up. Nothing was ever
+    launched, and the log said otherwise because the print was unconditional.
+    So test the status and release in ONE Nasal statement, and verify.
+
+    Space-free: the telnet `run nasal script=` argument cannot contain spaces
+    (see _nasal), hence the nested ifs instead of an `and`.
+    """
+    # The atomicity that matters is inside the Nasal statement, not in any
+    # Python lock -- so this does not need to hold the connection either.
+    _nasal(t, 'if(aircraft.Current_srm!=nil)'
+              'if(aircraft.Current_srm.status==1)'
+              'aircraft.Current_srm.release();')
+    time.sleep(0.25)
+    return missile_status(t)
+
+
+def kick_seeker(t):
+    """Restart fox2's search loop if it has stopped.
+
+    THE SEARCH LOOP IS A SELF-RE-ARMING TIMER, AND IT CAN DIE. fox2's search()
+    ends with settimer(func me.search(), 0.1) only on the paths that did not
+    lock; if that chain is ever broken the missile sits at MISSILE_SEARCH
+    forever while nothing evaluates its lock conditions.
+
+    Proved live at a textbook firing position (0.92nm, contact fresh and
+    correct, our nose 4.2deg off): total_horiz=-4.2, fcs_fov=27.5,
+    FOV_check()=1 -- it PASSED -- class A, target_air 1, guidance heat, range
+    inside 0.2-9nm. Every precondition satisfied, and status stayed 0. Nothing
+    was looking.
+
+    Calling search() again is safe: it returns immediately unless status is
+    MISSILE_SEARCH, so this only ever revives a stalled loop. Space-free for
+    the telnet nasal argument (see _nasal).
+    """
+    _nasal(t, 'if(aircraft.Current_srm!=nil)'
+              'if(aircraft.Current_srm.status==0)'
+              'aircraft.Current_srm.search();')
 
 
 def register_scenario(t, name, path):
@@ -319,11 +404,63 @@ def arm_aim9(t):
     t.set("/payload/armament/modelsUpperCase", "false")
     time.sleep(0.3)
     load_aim9(t)
-    t.set(MASTER_ARM, 1)
+    # MASTER ARM MUST BE 2, NOT 1. This is THE reason the seeker never locked
+    # and not one AIM-9 was ever fired.
+    #
+    # fox2.nas only ever reaches MISSILE_LOCK from inside search(), and
+    # search() only runs if something first sets status to MISSILE_SEARCH and
+    # calls it (fox2.nas:53 says so outright; a fresh missile is created at
+    # MISSILE_STANDBY=-1, and search() returns immediately without rearming
+    # its own timer while status is STANDBY). The ONLY thing that starts it
+    # for an AIM-9 is weapons.nas:414 in arm_selector():
+    #     if (Current_srm != nil and ArmSwitch.getValue() == 2
+    #         and sel_missile_count > 0) {
+    #         Current_missile = Current_srm; Current_missile.status = 0;
+    #         Current_missile.search(); }
+    # ArmSwitch == 2 EXACTLY. With master-arm=1 every other precondition was
+    # satisfied -- 1 is truthy, so system_start() ran, the stations populated
+    # and all four AIM-9s showed ready -- but that one equality failed, so
+    # search() was never called and the seeker sat at STANDBY for the entire
+    # flight. Confirmed live across three runs: the radar designation worked
+    # (active_u=1.34nm, a real contact) while missile status never left -1,
+    # and aim9_in_envelope gates on has_lock first, so no missile could ever
+    # be fired no matter how well the jet flew.
+    #
+    # Note the cockpit's own master_arm_cycle (weapons.nas:366) only toggles
+    # 0<->1 and can never produce a 2, so this is not reachable by pressing
+    # the switch -- it has to be set directly.
+    t.set(MASTER_ARM, 2)
     time.sleep(0.4)
+    # Setting the selector is what fires arm_selector() (via the listener at
+    # weapons.nas:35). Set it TWICE: the listener runs arm_selector() BEFORE
+    # demand_weapons_refresh(), so on the first pass sel_missile_count can
+    # still be 0 and the search() branch is skipped even with arm=2. The
+    # second set runs against a refreshed count.
     t.set(WEAPON_SELECTOR, SELECTOR_SRM)
     time.sleep(0.8)
-    print(f"  Master arm={t.get(MASTER_ARM)} selector={t.get(WEAPON_SELECTOR)}")
+    t.set(WEAPON_SELECTOR, SELECTOR_SRM)
+    time.sleep(0.8)
+    print(f"  Master arm={t.get(MASTER_ARM)} selector={t.get(WEAPON_SELECTOR)} "
+          f"seeker={missile_status(t)}")
+
+
+def rearm_next_aim9(t):
+    """Hand Current_srm to the next unfired AIM-9 and start its seeker.
+
+    After release() the round sits at MISSILE_FLYING(2). weapons.nas:226
+    advances Current_srm to the next ready missile only while the selector is
+    re-run, and arm_selector() then needs ArmSwitch==2 to call search() on it
+    (see arm_aim9 for why that value and not 1). Re-running the selector does
+    both in the right order.
+    """
+    t.set(MASTER_ARM, 2)
+    t.set(WEAPON_SELECTOR, SELECTOR_GUN)   # force a real transition, so the
+    time.sleep(0.3)                        # listener fires on the way back
+    t.set(WEAPON_SELECTOR, SELECTOR_SRM)
+    time.sleep(0.6)
+    st = missile_status(t)
+    print(f"  re-armed AIM-9, seeker={st}")
+    return st
 
 
 GUN_TRIGGER = "/controls/armament/trigger"
@@ -359,6 +496,21 @@ def missile_status(t):
     The missile object lives only in Nasal (weapons.Current_srm) -- there is
     no property mirroring its status, so it has to be poked across.
     """
+    # Atomic: this scratch-property probe is a set/run/sleep/get SEQUENCE, and
+    # several threads share one Telnet. Without holding the lock across the
+    # whole thing, two concurrent probes trample the same property between one
+    # another's set and get -- confirmed live, a re-arm read back
+    # "seeker=115.9519402756136", another thread's float, not a status.
+    # DO NOT HOLD THE CONNECTION LOCK ACROSS THE SLEEP.
+    #
+    # Each probe here uses its OWN scratch property, so cross-talk is not what
+    # the lock was protecting -- Telnet already locks per command, which is
+    # what keeps the socket intact. Holding it across a 0.3s sleep while the
+    # lock poller runs every 0.1s meant one thread owned the connection ~75%
+    # of the time and starved the others: confirmed live, an entire run where
+    # designate() was never called once, armament.contact was therefore never
+    # set, and nothing ever locked (0 designations, 0 locks, 0 shots, no
+    # errors logged because nothing failed -- the poller simply never got in).
     t.set("/sim/probe/msl", "-")
     _nasal(t, 'setprop("/sim/probe/msl",aircraft.Current_srm==nil?"none"'
               ':""~aircraft.Current_srm.status);')

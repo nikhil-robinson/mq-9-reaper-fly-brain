@@ -60,6 +60,15 @@ FCS_DIAG_PROPS = [
     "/fdm/jsbsim/fcs/elevator-pos-deg",
     "/fdm/jsbsim/aero/alpha-deg",
     "/fdm/jsbsim/flight-path/gamma-deg",
+    # Roll chain: bank collapses mid-turn (-36 -> -8deg) while the controller
+    # commands full opposite roll, and no amount of reasoning from the outside
+    # has explained it. Read the same chain the pitch axis exposed.
+    "/controls/flight/aileron",
+    "/fdm/jsbsim/fcs/aileron-cmd-norm",
+    "/fdm/jsbsim/fcs/stick-roll",
+    "/fdm/jsbsim/cas/roll-output",
+    "/fdm/jsbsim/velocities/p-rad_sec",
+    "/orientation/roll-deg",
 ]
 # TELNET MUST NOT TOUCH THE HOT LOOP. native_protocol.py's docstring says it
 # outright ("an earlier session's telnet-driven hot loop rolled inverted and
@@ -71,6 +80,21 @@ FCS_DIAG_PROPS = [
 # measured. Enemy state is therefore polled by a BACKGROUND THREAD and the
 # control loop only ever reads the latest snapshot.
 ENEMY_POLL_SEC = 0.5
+# How many consecutive empty /ai/models indices to tolerate before concluding
+# the list has ended, and a hard stop -- see read_enemies.
+AI_SCAN_TOLERANCE = 3
+AI_SCAN_MAX = 12
+# 0.35, not 0.1: missile_status itself costs ~0.3s (it has to let the Nasal
+# run), so polling every 0.1s asked for the connection more often than the
+# probe could complete and monopolised it. The 1.5s lock latch below is what
+# actually covers the gaps between reads.
+LOCK_POLL_SEC = 0.35  # seeker status only -- cheap, and shots are fleeting
+# How long a seen lock is trusted for. Covers the poll interval and the
+# seeker's own flicker -- see poll_lock; fire_srm is the real gate.
+LOCK_LATCH_SEC = 1.5
+# Give up on a committed target only if it runs this far away -- well beyond
+# the AIM-9's 9nm seeker limit, so we never drop one we could still shoot.
+ABANDON_RANGE_NM = 12.0
 
 
 def enable_bombable(t):
@@ -114,12 +138,27 @@ def read_enemies(t):
     actively firing), which lets EVADE trigger from a real threat instead of
     only reacting after our own damage has already gone up.
     """
+    # DO NOT BAIL ON THE FIRST MISSING INDEX.
+    #
+    # A single None used to end the scan, so one transient read returned an
+    # EMPTY list -- and the caller's `if got:` then silently skipped the whole
+    # cycle including the radar designation. With three threads sharing one
+    # telnet connection that happened often enough that designate() was never
+    # called in an entire run (0 designations, 0 locks, 0 shots, and no errors
+    # because nothing raised). Verified on an idle connection that the scan
+    # itself is fine: it returns RED1, RED2, RED3.
+    #
+    # Scan a few indices past a gap before giving up, so a dropped read costs
+    # one aircraft for one cycle instead of the entire list.
     out = []
     i = 0
-    while True:
+    misses = 0
+    while misses < AI_SCAN_TOLERANCE and i < AI_SCAN_MAX:
         cs = t.get("/ai/models/aircraft[%d]/callsign" % i)
         if cs is None:
-            return out
+            misses += 1
+            i += 1
+            continue
         n = "/ai/models/aircraft[%d]" % i
         lat = t.get(n + "/position/latitude-deg")
         lon = t.get(n + "/position/longitude-deg")
@@ -138,12 +177,17 @@ def read_enemies(t):
                 alive=(damage is None or float(damage) < 100.0),
             ))
         i += 1
+    return out
 
 
 def main():
     t = Telnet()
     time.sleep(2)
-    startup(t)
+    # Keep the autopilot flying the jet through ALL of the setup below
+    # (Bombable menus, arming, target search, the accelerate-to-corner wait).
+    # Releasing the stick here left it unpiloted for minutes and it flew into
+    # terrain -- see startup()'s docstring.
+    startup(t, hand_over_stick=False)
 
     # HOLD THE JET WHILE WE SET UP. startup() ends by calling connect_stick(),
     # which clears the autopilot locks so our stick reaches the FCS -- and with
@@ -210,12 +254,39 @@ def main():
     # same reason -- these are telnet round trips and must never touch the
     # 20Hz hot loop.
     state = {"enemies": enemies, "stop": False, "locked": False,
-            "locked_on": None, "own_damage": 0.0, "g_cmd": 0.0}
+            "locked_on": None, "own_damage": 0.0, "g_cmd": 0.0,
+            "want_target": None, "last_lock_t": -1e9}
+
+    # ONE-CONNECTION-PER-THREAD.
+    #
+    # Every background thread opens its OWN Telnet. Sharing one connection was
+    # the root of a whole family of bugs that looked like aircraft or weapon
+    # problems and were neither.
+    #
+    # FlightGear's telnet is a request/response stream. A single timeout leaves
+    # one unread reply in the buffer, and from that moment every read returns
+    # the PREVIOUS command's answer -- the stream is permanently off by one,
+    # silently, with no exception. Locking made the connection thread-SAFE
+    # (one command at a time) but cannot resynchronise a desynced stream, and
+    # holding the lock across a probe's sleep starved the other threads
+    # instead.
+    #
+    # Proved by comparison, mid-fight, on the very same running sim: on a
+    # FRESH connection missile_status() returned '1' (MISSILE_LOCK) and
+    # designated_callsign() returned 'RED1' -- everything healthy -- while the
+    # shared connection was reading the seeker as "-" and the contact as None.
+    # The seeker had been locking all along; we were reading a stale stream and
+    # concluding the weapon was broken.
+    #
+    # Separate sockets remove the interleaving entirely, which is both simpler
+    # and stronger than any locking discipline. FlightGear accepts multiple
+    # telnet clients on the same port.
 
     if FCS_DIAG:
         diag_t = Telnet()
 
         def poll_fcs_diag():
+            t = Telnet()   # own connection -- see ONE-CONNECTION-PER-THREAD
             while not state["stop"]:
                 try:
                     vals = [diag_t.get(p) for p in FCS_DIAG_PROPS]
@@ -232,24 +303,77 @@ def main():
         diag_thread.start()
 
     def poll_enemies():
+        # OWN CONNECTION. See ONE-CONNECTION-PER-THREAD below. Guarded so the
+        # thread cannot die silently if FlightGear refuses the socket.
+        try:
+            t = Telnet()
+        except Exception as exc:
+            print("  enemy poller: NO TELNET (%s) -- thread dead" % exc,
+                  flush=True)
+            return
         last_designated = None
         while not state["stop"]:
             try:
                 got = read_enemies(t)
                 if got:
                     state["enemies"] = got
-                    nearest = min(got, key=lambda e: haversine_m(
-                        float(t.get("/position/latitude-deg") or 0),
-                        float(t.get("/position/longitude-deg") or 0),
-                        e["lat"], e["lon"]))
-                    if nearest["callsign"] != last_designated:
-                        fp.designate(t, nearest["callsign"])
-                        last_designated = nearest["callsign"]
+                # DESIGNATION IS NOT HOSTAGE TO THIS CYCLE'S READ.
+                #
+                # All of the radar work below used to sit inside
+                # `if got:`, so ONE empty read skipped it entirely --
+                # and with three threads sharing one telnet that was
+                # frequent enough that designate() was never called in
+                # a whole run (0 designations, 0 locks, 0 shots, no
+                # errors, because nothing raised). Work from the last
+                # known list: a dropped read should cost fresh
+                # positions for one cycle, never the designation the
+                # seeker depends on.
+                if state["enemies"]:
+                    # DESIGNATE WHAT THE PILOT IS ACTUALLY CHASING.
+                    #
+                    # This used to compute its OWN "nearest" here, from its
+                    # own lagging telnet position reads, entirely independent
+                    # of the target the control loop had picked at 20Hz from
+                    # the native FDM. The two disagreed constantly, and the
+                    # radar was then designating a different aircraft than the
+                    # one we were pursuing. Confirmed live by probing the sim
+                    # mid-fight: every seeker precondition passed -- status=0
+                    # searching, class A, target_air=1, contact valid, type
+                    # AIR, speed 495kt, fire range 0.2-9nm, FOV 27.5deg -- but
+                    # armament.contact.get_range() read 6.77nm while the jet
+                    # was 0.75nm behind its actual target at 7deg off the
+                    # nose. The seeker was faithfully searching the wrong
+                    # aeroplane, so FOV_check could never pass and no AIM-9
+                    # ever locked.
+                    #
+                    # It also broke the lock even when it did work, because
+                    # the main loop gates has_lock on
+                    # `state["locked_on"] == target["callsign"]` -- so a lock
+                    # on the poller's choice was rejected anyway.
+                    want = state.get("want_target")
+                    if want is None:
+                        want = state["enemies"][0]["callsign"]
+                    # VERIFY THE DESIGNATION, DO NOT ASSUME IT STUCK.
+                    #
+                    # This used to designate only when the wanted target
+                    # CHANGED, so a designation dropped later was never
+                    # repaired. Probed live mid-fight: the seeker was
+                    # searching with four rounds available and the jet was
+                    # pointing 8deg off the bandit -- inside the firing gate
+                    # at last -- while awg_9.active_u_callsign and
+                    # armament.contact both read nil. A perfect shot with
+                    # nothing designated to shoot at, and the run finished
+                    # with 0 locks.
+                    if want != last_designated or fp.designated_callsign(t) != want:
+                        fp.designate(t, want)
+                        last_designated = want
                         state["locked"] = False
-                    st = fp.missile_status(t)
-                    state["locked"] = (st == str(fp.MISSILE_LOCK))
+                    # state["locked"] is owned by poll_lock (fast cadence).
                     state["locked_on"] = last_designated
-                    state["locked_on_node"] = nearest["node"]
+                    node = next((e["node"] for e in state["enemies"]
+                                 if e["callsign"] == last_designated), None)
+                    if node is not None:
+                        state["locked_on_node"] = node
                 dmg = t.get("/bombable/attributes/damage")
                 if dmg not in (None, ""):
                     state["own_damage"] = float(dmg)
@@ -260,7 +384,69 @@ def main():
     poller = threading.Thread(target=poll_enemies, daemon=True)
     poller.start()
 
+    def poll_lock():
+        # A THREAD MUST NOT DIE ON ITS CONNECTION. This constructor used to sit
+        # outside any try, so if FlightGear refused the socket the daemon
+        # thread vanished silently -- no log line, no exception anywhere. For
+        # the fire worker that meant every shot request was dropped: a run
+        # logged 50 locks, 12 moments with lock+range+boresight all satisfied,
+        # and FIRED=0 REFUSED=0, because nothing was consuming the flag.
+        try:
+            t = Telnet()
+        except Exception as exc:
+            print("  %s: NO TELNET (%s) -- thread dead" % ("lock poller", exc),
+                  flush=True)
+            return   # own connection -- see ONE-CONNECTION-PER-THREAD
+        """Watch the seeker on its OWN fast cadence.
+
+        The enemy poller reads every bandit's position first -- a dozen-plus
+        telnet round trips -- and only then checks the seeker, so one cycle
+        can take seconds. A lock that comes and goes inside that window is
+        never seen, and a shot that was available is never taken: run 8 got
+        exactly ONE launch in ~900 steps despite the seeker reaching
+        MISSILE_LOCK (probed live at status=1) while the nose was on target.
+        Missile status is three cheap round trips, so poll it by itself and
+        let the expensive enemy sweep run at its own pace. Safe to share the
+        connection now that Telnet holds a lock -- see its docstring.
+        """
+        while not state["stop"]:
+            try:
+                st = fp.missile_status(t)
+                if st == str(fp.MISSILE_LOCK):
+                    state["last_lock_t"] = time.monotonic()
+                elif st == str(fp.MISSILE_SEARCH):
+                    # Revive a stalled search loop -- see fp.kick_seeker. A
+                    # dead timer chain looks exactly like "searching" and never
+                    # locks, however good the geometry is.
+                    fp.kick_seeker(t)
+                # LATCH THE LOCK BRIEFLY.
+                #
+                # The seeker's real lock flickers, and this flag is read over
+                # telnet with a 0.3s sleep, so short genuine locks are missed
+                # outright. Measured over run 27's 400 logged samples: lock
+                # 17%, range gate 46%, boresight 18% -- 53 samples had BOTH
+                # range and boresight, but only 3 also had the lock flag, so
+                # 50 good firing positions were thrown away on a stale read.
+                # While locked the jet reached 1.21nm and 7deg, well inside
+                # both gates.
+                #
+                # Latching is safe only because fp.fire_srm tests the status
+                # and releases in ONE Nasal statement: if the seeker is not
+                # actually locked at that instant fox2 refuses, the round
+                # stays on the rail, and the caller un-counts it. The Nasal
+                # check is the real gate; this flag only decides when to try.
+                state["locked"] = (
+                    time.monotonic() - state.get("last_lock_t", -1e9)
+                    <= LOCK_LATCH_SEC)
+            except Exception as exc:
+                print("  lock poll error: %s" % exc, flush=True)
+            time.sleep(LOCK_POLL_SEC)
+
+    lock_poller = threading.Thread(target=poll_lock, daemon=True)
+    lock_poller.start()
+
     target = enemies[0]
+    committed_target = None
     min_range_nm = 1e9
     kills = 0
     fire_requested = {"missile": False, "gun_on": False}
@@ -271,18 +457,59 @@ def main():
     # loop only ever SETS a flag; this thread notices and acts on it, which
     # keeps every fp.* call (each several telnet round trips) off the 20Hz path.
     def fire_worker():
+        # A THREAD MUST NOT DIE ON ITS CONNECTION. This constructor used to sit
+        # outside any try, so if FlightGear refused the socket the daemon
+        # thread vanished silently -- no log line, no exception anywhere. For
+        # the fire worker that meant every shot request was dropped: a run
+        # logged 50 locks, 12 moments with lock+range+boresight all satisfied,
+        # and FIRED=0 REFUSED=0, because nothing was consuming the flag.
+        try:
+            t = Telnet()
+        except Exception as exc:
+            print("  %s: NO TELNET (%s) -- thread dead" % ("fire worker", exc),
+                  flush=True)
+            return   # own connection -- see ONE-CONNECTION-PER-THREAD
         gun_currently_on = False
         while not state["stop"]:
             if fire_requested["missile"]:
                 fire_requested["missile"] = False
-                if state["locked"] and state.get("locked_on_node"):
+                # locked_on_node is NOT required to shoot -- fp.fire_srm
+                # releases through aircraft.Current_srm and never looks at the
+                # AI node. Requiring it here silently dropped the shot (the
+                # request was consumed, then discarded, with nothing logged)
+                # whenever the poller had not managed to set it.
+                if not state["locked"]:
+                    print("  fire skipped -- no lock at trigger time", flush=True)
+                elif True:
                     # The lock is already established by the poller's own
                     # designate()/missile_status() cycle above; this only
                     # needs to release the round, not re-run the whole
                     # search/lock sequence.
-                    t.nasal('aircraft.Current_srm.release();')
-                    print("  FIRED missile at %s" % state.get("locked_on"),
-                          flush=True)
+                    # Atomic check-and-release, and believe only the
+                    # read-back: status 2 (MISSILE_FLYING) means the round
+                    # actually left the rail. The old unconditional print
+                    # claimed launches that never happened -- see fp.fire_srm.
+                    st = fp.fire_srm(t)
+                    if st == str(fp.MISSILE_FLYING):
+                        print("  FIRED missile at %s" % state.get("locked_on"),
+                              flush=True)
+                    else:
+                        # Rail still loaded: give the budget back so a
+                        # refused attempt costs nothing but the cooldown.
+                        pilot.missiles_fired = max(0, pilot.missiles_fired - 1)
+                        continue   # do not re-arm; nothing was launched
+                    state["locked"] = False   # this round is gone
+                    # RE-ARM THE NEXT ROUND, or we fire exactly once and then
+                    # sit on three live AIM-9s for the rest of the fight.
+                    # release() puts the round at MISSILE_FLYING(2), and
+                    # weapons.nas:226 only hands Current_srm to the next
+                    # missile when the selector is re-run against a refreshed
+                    # count (`Current_srm == nil or Current_srm.status == 2`).
+                    # Nothing does that on its own -- the cockpit does it when
+                    # the pilot re-selects -- so do it here, and start the new
+                    # seeker searching the same way arm_aim9 does.
+                    time.sleep(0.5)
+                    fp.rearm_next_aim9(t)
             want_gun = fire_requested["gun_on"]
             if want_gun != gun_currently_on:
                 fp.fire_gun(t, want_gun)
@@ -328,11 +555,47 @@ def main():
                   % (step, state["own_damage"]), flush=True)
             break
 
-        # Chase the nearest one. Threat prioritisation across multiple
-        # attackers is deliberately this simple for now.
-        target = min(enemies, key=lambda e: haversine_m(
-            own_lat, own_lon, e["lat"], e["lon"]))
+        # COMMIT TO ONE TARGET UNTIL IT IS DEAD. Kill them one by one.
+        #
+        # This used to re-pick the nearest enemy every step at 20Hz, and with
+        # three bandits in a turning fight the "nearest" flips constantly --
+        # logged live switching RED2 (2.58nm) -> RED1 (3.79nm) -> RED2 within
+        # a couple of seconds. That thrashed the RADAR, which is the part
+        # that actually matters: fp.designate() costs ~2.4s per call (it sets
+        # the callsign, waits for the radar to sweep it up, then verifies),
+        # so a target that changes faster than that can NEVER be designated.
+        #
+        # Confirmed live by probing mid-fight: the jet was tracking RED1 with
+        # the nose 3deg off at 2.58nm -- a textbook shot -- while
+        # awg_9.active_u_callsign and armament.contact were both still RED2,
+        # 5.1nm away. Every other seeker precondition passed. The seeker was
+        # simply pointed at the wrong aeroplane because the designation could
+        # not keep up with the target selection.
+        #
+        # So pick once, and hold until the target dies or goes truly beyond
+        # reach. Switching only on death is also what "take them down one by
+        # one" means tactically: chasing whichever happens to be closest this
+        # instant is how you merge with all three and kill none.
+        alive_callsigns = {e["callsign"] for e in enemies}
+        if committed_target not in alive_callsigns:
+            committed_target = None          # dead, or gone from the list
+        if committed_target is not None:
+            cur = next(e for e in enemies if e["callsign"] == committed_target)
+            cur_nm = haversine_m(own_lat, own_lon, cur["lat"], cur["lon"]) * M_TO_NM
+            if cur_nm > ABANDON_RANGE_NM:
+                print("  abandoning %s at %.1fnm -- out of reach"
+                      % (committed_target, cur_nm), flush=True)
+                committed_target = None
+        if committed_target is None:
+            new_tgt = min(enemies, key=lambda e: haversine_m(
+                own_lat, own_lon, e["lat"], e["lon"]))
+            committed_target = new_tgt["callsign"]
+            print("  committing to %s" % committed_target, flush=True)
+        target = next(e for e in enemies if e["callsign"] == committed_target)
 
+        # Publish the chosen target so the poller designates THIS one on the
+        # radar. Single source of truth -- see poll_enemies.
+        state["want_target"] = target["callsign"]
         rng_m = haversine_m(own_lat, own_lon, target["lat"], target["lon"])
         rng_nm = rng_m * M_TO_NM
         min_range_nm = min(min_range_nm, rng_nm)

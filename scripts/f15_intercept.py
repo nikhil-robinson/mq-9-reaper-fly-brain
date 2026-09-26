@@ -71,9 +71,11 @@ Then: .venv/bin/python scripts/f15_intercept.py
 import math
 import os
 import socket
+import threading
 import time
 
 from fly_brain.geo import angle_diff_deg, bearing_deg, haversine_m, offset_point
+from fly_brain.combat import path_hold_g
 from fly_brain.native_protocol import NativeBridge
 
 TELNET_HOST = "localhost"
@@ -247,9 +249,25 @@ def effective_target_alt_ft(target_alt_ft, airspeed_kt):
 
 
 class Telnet:
-    """One-time setup only -- not used in the hot loop. See module docstring."""
+    """Not used in the hot loop -- see module docstring.
+
+    THREAD-SAFE, because it has to be: dogfight_bombable.py shares one
+    connection between the enemy poller, the firing worker and the FCS diag
+    thread. Without this they interleave on the socket and read each other's
+    replies. Confirmed live -- a re-arm printed
+    "re-armed AIM-9, seeker=115.9519402756136", which is not a seeker status
+    at all (they are -1/0/1/2) but another thread's in-flight float.
+
+    `lock` is public and REENTRANT so callers can also make a multi-command
+    sequence atomic. That matters for the probe idiom used throughout
+    f15_props.py -- set a scratch property, run a Nasal snippet that writes
+    it, sleep, read it back. Locking each command individually is not enough:
+    two threads probing at once still trample the same scratch property
+    between one another's set and get.
+    """
 
     def __init__(self, host=TELNET_HOST, port=TELNET_PORT, timeout=5.0):
+        self.lock = threading.RLock()
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._buf = b""
@@ -288,23 +306,45 @@ class Telnet:
         at all look like a run with dozens. find_ai_target() has the same
         `is None` break, so it would hang the same way.
         """
-        response = self._send(f"get {path}")
+        with self.lock:
+            response = self._send(f"get {path}")
         parts = response.split("'")
         if len(parts) < 2 or parts[1] == "":
             return None
         return parts[1]
 
     def set(self, path, value):
-        self._send(f"set {path} {value}")
+        with self.lock:
+            self._send(f"set {path} {value}")
 
     def nasal(self, script):
-        self._send(f"run nasal script={script}")
+        with self.lock:
+            self._send(f"run nasal script={script}")
 
     def close(self):
         self._sock.close()
 
 
-def startup(t):
+def startup(t, hand_over_stick=True):
+    """Bring the jet up. Pass hand_over_stick=False if the CALLER still has
+    minutes of setup to do before its control loop starts.
+
+    THE JET MUST NEVER BE LEFT UNPILOTED. connect_stick() clears FlightGear's
+    own altitude/heading locks, and from that moment nothing holds the
+    aircraft until a control loop starts writing native ctrls. Calling it at
+    the end of startup() was fatal for dogfight_bombable.py, which then does
+    Bombable menu setup, weapon arming and target acquisition before its loop
+    begins: confirmed live, the jet descended through the whole setup and
+    "Aircraft hit ShrubCover. and exploded." at sim time 86s, having engaged
+    att-hold 1900ft lower than usual (13668ft vs ~15580ft) and never reaching
+    the first control step.
+
+    connect_stick's own docstring already documents this failure and says it
+    was split out precisely so callers could do their work BEFORE the stick is
+    released -- but startup() still released it, so the split never took
+    effect for them. It only turned fatal once setup slowed from ~30s to
+    minutes under load.
+    """
     print("Starting engines (quickstart + crank)...")
     t.nasal('aircraft.quickstart()')
     time.sleep(1.5)
@@ -387,7 +427,10 @@ def startup(t):
     # listener. Confirmed live -- an identical startup sometimes came up with
     # pitch-switch/roll-switch back at 1. Clear until it actually sticks
     # rather than clearing once and hoping we won the race.
-    connect_stick(t)
+    if hand_over_stick:
+        connect_stick(t)
+    else:
+        print("  stick left with the autopilot -- caller will connect it")
 
 
 def connect_stick(t):
@@ -497,7 +540,9 @@ def main():
         # is the whole reason every banked run descended. On top of that
         # baseline, add a small correction for altitude error and a damping
         # term on climb rate.
-        level_turn_g = 1.0 / max(0.2, math.cos(math.radians(roll_deg)))
+        level_turn_g = path_hold_g(
+            {"airspeed_kt": airspeed_kt,
+             "climb_rate_fps": filtered_climb_rate_fps}, roll_deg)
         g_cmd = level_turn_g + alt_err_ft * K_ALT_G - filtered_climb_rate_fps * K_CLIMB_G
 
         # Stall guard, now in the units the airframe actually limits: max
